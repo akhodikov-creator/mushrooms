@@ -1,0 +1,21 @@
+{
+  "rules": {
+    "gribnik_scores": {
+      ".read": true,
+      ".indexOn": "score",
+      "$row": {
+        ".write": "!data.exists() && newData.exists()",
+        ".validate": "newData.hasChildren(['nick', 'score'])",
+        "nick":          { ".validate": "newData.isString() && newData.val().length >= 1 && newData.val().length <= 20" },
+        "score":         { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 2000000" },
+        "mushrooms":     { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 100000" },
+        "oles":          { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 100000" },
+        "kills":         { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 100000" },
+        "died":          { ".validate": "newData.isBoolean()" },
+        "best_mushroom": { ".validate": "newData.isString() && newData.val().length <= 40" },
+        "created_at":    { ".validate": "newData.isString() && newData.val().length <= 40" },
+        "$other":        { ".validate": false }
+      }
+    }
+  }
+}
