@@ -173,25 +173,59 @@
 
 <script type="module" src="js/main.js"></script>
 <script>
-// Если игру открыли двойным кликом по файлу, браузер запретит
-// загрузку ES-модулей и экран останется пустым. Объясним, что делать.
-setTimeout(function () {
-  if (window.__game) return;
-  var d = document.createElement('div');
-  d.style.cssText = 'position:fixed;inset:0;z-index:99;display:flex;align-items:center;' +
-    'justify-content:center;padding:30px;background:#0d1410;color:#e8f0dc;' +
-    "font-family:'Segoe UI',system-ui,sans-serif;text-align:center;line-height:1.7";
-  d.innerHTML = '<div><h2 style="color:#ffcd5a">Игра не запустилась</h2>' +
-    (location.protocol === 'file:'
-      ? '<p>Похоже, файл открыт напрямую с диска. Браузер запрещает так загружать модули.<br>' +
-        'Запусти в папке с игрой локальный сервер:</p>' +
-        '<p><code style="background:#000;padding:8px 14px;border-radius:8px;display:inline-block">' +
-        'python -m http.server 8000</code></p>' +
-        '<p>и открой <b>http://localhost:8000</b></p>'
-      : '<p>Не удалось загрузить Three.js с CDN. Проверь интернет и обнови страницу.</p>') +
-    '</div>';
-  document.body.appendChild(d);
-}, 7000);
+// Диагностика запуска.
+//
+// 1) Открыли файл двойным кликом — браузер запретит ES-модули.
+// 2) Не дошёл three.js с CDN.
+// 3) Обновилась игра, а у игрока в кеше лежит часть старых файлов:
+//    новый модуль просит из старого то, чего там ещё нет, и импорт падает.
+//    Третий случай лечится сам — принудительно обновляем кеш и перезагружаемся.
+(function () {
+  var ASSETS = [
+    'styles.css', 'js/main.js', 'js/game.js', 'js/config.js', 'js/world.js',
+    'js/player.js', 'js/animals.js', 'js/weapons.js', 'js/pickups.js',
+    'js/inventory.js', 'js/ui.js', 'js/leaderboard.js', 'js/audio.js',
+    'js/utils.js', 'js/geo.js', 'js/mushrooms.js'
+  ];
+
+  function explain() {
+    var d = document.createElement('div');
+    d.style.cssText = 'position:fixed;inset:0;z-index:99;display:flex;align-items:center;' +
+      'justify-content:center;padding:30px;background:#0d1410;color:#e8f0dc;' +
+      "font-family:'Segoe UI',system-ui,sans-serif;text-align:center;line-height:1.7";
+    d.innerHTML = '<div><h2 style="color:#ffcd5a">Игра не запустилась</h2>' +
+      (location.protocol === 'file:'
+        ? '<p>Похоже, файл открыт напрямую с диска. Браузер запрещает так загружать модули.<br>' +
+          'Запусти в папке с игрой локальный сервер:</p>' +
+          '<p><code style="background:#000;padding:8px 14px;border-radius:8px;display:inline-block">' +
+          'python -m http.server 8000</code></p>' +
+          '<p>и открой <b>http://localhost:8000</b></p>'
+        : '<p>Не удалось загрузить игру. Проверь интернет и обнови страницу<br>' +
+          'сочетанием <b>Ctrl+F5</b>.</p>') +
+      '</div>';
+    document.body.appendChild(d);
+  }
+
+  setTimeout(function () {
+    if (window.__game) return;
+    var retried = false;
+    try { retried = sessionStorage.getItem('gribnik.cacheRetry') === '1'; } catch (e) {}
+    if (retried || location.protocol === 'file:') { explain(); return; }
+
+    try { sessionStorage.setItem('gribnik.cacheRetry', '1'); } catch (e) {}
+    // тянем файлы мимо кеша — это обновляет и сам кеш, — затем перезагружаемся
+    Promise.all(ASSETS.map(function (f) {
+      return fetch(f, { cache: 'reload' }).catch(function () {});
+    })).then(function () { location.reload(); });
+  }, 7000);
+
+  // удачный запуск снимает флаг, чтобы попытка была доступна и в следующий раз
+  var ok = setInterval(function () {
+    if (!window.__game) return;
+    clearInterval(ok);
+    try { sessionStorage.removeItem('gribnik.cacheRetry'); } catch (e) {}
+  }, 1000);
+})();
 </script>
 </body>
 </html>

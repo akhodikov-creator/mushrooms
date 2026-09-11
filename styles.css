@@ -114,6 +114,7 @@ ul.keys em{color:var(--gold);font-style:normal}
 /* доска рекордов */
 .src{font-size:11px;color:var(--dim);margin:-4px 0 8px;letter-spacing:.06em}
 .src.cloud{color:var(--green)}
+.src.error{color:#e8a030}
 .board{
   border:1px solid var(--line);border-radius:12px;
   background:rgba(0,0,0,.28);overflow:hidden;

@@ -233,8 +233,12 @@ export const UI = {
       }).join('');
     }
     if (this.el['board-src'] && target === 'board') {
-      this.el['board-src'].textContent = source === 'cloud'
-        ? '● общая доска' : '○ локальная доска (этот браузер)';
+      const label = {
+        cloud: '● общая доска — виден весь рейтинг',
+        local: '○ локальная доска (только этот браузер)',
+        error: '⚠ доска недоступна — показаны твои забеги',
+      }[source] || '';
+      this.el['board-src'].textContent = label;
       this.el['board-src'].className = 'src ' + source;
     }
   },

@@ -65,52 +65,32 @@ python -m http.server 8000
 
 ## Доска рекордов
 
-Из коробки работает локальная доска (`localStorage`) — этого хватает, чтобы играть одному. Ник задаётся на старте, пароля нет: под каким ником играешь, под таким и попадаешь в таблицу.
+Из коробки доска локальная (`localStorage`) — игра работает сразу, но каждый видит только свои забеги. Ник задаётся на старте, пароля нет: под каким ником играешь, под таким и попадаешь в таблицу.
 
-Чтобы доска стала **общей для всех друзей**, заведи бесплатный проект на [supabase.com](https://supabase.com):
+Чтобы рейтинг стал **общим для всех друзей**, заполни в [`js/config.js`](js/config.js) один из двух блоков. Что заполнено — то и работает.
 
-1. В проекте открой **SQL Editor** и выполни:
+### Вариант A: Firebase Realtime Database (проще, ключей не нужно)
 
-```sql
-create table if not exists gribnik_scores (
-  id          bigserial primary key,
-  nick        text not null check (char_length(nick) between 1 and 20),
-  score       integer not null check (score >= 0 and score <= 2000000),
-  mushrooms   integer not null default 0,
-  oles        integer not null default 0,
-  kills       integer not null default 0,
-  died        boolean not null default false,
-  best_mushroom text default '',
-  created_at  timestamptz not null default now()
-);
+1. [console.firebase.google.com](https://console.firebase.google.com) → **Create a project** → имя `gribnik` → Google Analytics можно выключить.
+2. Слева **Build → Realtime Database** → **Create Database** → регион любой → стартовать в **Locked mode** (правила пропишем следующим шагом).
+3. Вкладка **Rules** → заменить содержимое на файл [`firebase-rules.json`](firebase-rules.json) → **Publish**.
+4. На вкладке **Data** скопировать адрес базы вида `https://gribnik-1234-default-rtdb.europe-west1.firebasedatabase.app` и вписать его в `FIREBASE.dbUrl`.
 
-alter table gribnik_scores enable row level security;
+Ключи не нужны вообще: доступ целиком определяют правила из шага 3 — доску читают все, добавлять можно только новые записи, а править и удалять существующие нельзя (`".write": "!data.exists()"`). Поля проверяются по типам и длине, лишние поля отвергаются.
 
--- любой может читать доску
-create policy "read scores" on gribnik_scores
-  for select using (true);
+### Вариант B: Supabase
 
--- любой может добавить свой результат, но не менять чужие
-create policy "insert scores" on gribnik_scores
-  for insert with check (true);
+1. Новый проект на [supabase.com](https://supabase.com) (на бесплатном тарифе их не больше двух).
+2. **SQL Editor → New query** → выполнить [`supabase-setup.sql`](supabase-setup.sql).
+3. **Project Settings → API Keys**: скопировать Project URL и ключ `anon public` (подойдёт и новый `publishable`) в `SUPABASE`.
 
-create index if not exists gribnik_scores_score_idx on gribnik_scores (score desc);
-```
+### Что общего
 
-2. Скопируй **Project URL** и **anon public** ключ из **Settings → API**.
-3. Впиши их в [`js/config.js`](js/config.js):
+Результат уходит на сервер в конце каждого забега. Если сети нет — забег кладётся в очередь в браузере и досылается при следующем запуске, так что ничей рекорд не теряется. Если база недоступна, игра не виснет и не падает: под доской появляется «⚠ доска недоступна», и показываются локальные забеги.
 
-```js
-export const SUPABASE = {
-  url: 'https://xxxxxxxx.supabase.co',
-  anonKey: 'eyJhbGciOi...',
-  table: 'gribnik_scores',
-};
-```
+Заводи под игру **отдельный проект**, а не тот, где лежат рабочие данные: ссылку на игру увидит много людей, а вместе с ней и адрес базы.
 
-Anon-ключ публичный, его не страшно коммитить — доступ к данным ограничивают политики RLS выше.
-
-> Защиты от накрутки счёта тут нет: результат считает браузер, и при желании его можно подделать через консоль. Для игры с друзьями это нормально; если захочется честного рейтинга — счёт надо пересчитывать на сервере.
+> Защиты от накрутки счёта нет: результат считает браузер, и при желании его можно подделать через консоль. Для игры с друзьями это нормально; для честного рейтинга счёт пришлось бы пересчитывать на сервере.
 
 ---
 

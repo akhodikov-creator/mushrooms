@@ -66,7 +66,13 @@ async function refreshBoard() {
   const { rows, source } = await Leaderboard.top(15);
   UI.renderBoard('board', rows, source, Leaderboard.getNick());
 }
-refreshBoard();
+
+// Результаты, не ушедшие из-за обрыва сети, досылаем на следующем запуске.
+(async () => {
+  const n = await Leaderboard.flushPending();
+  await refreshBoard();
+  if (n) UI.startMsg(`Доотправлено результатов: ${n}`, 'info');
+})();
 
 /* ---------- ползунки ---------- */
 function saveSettings() {
