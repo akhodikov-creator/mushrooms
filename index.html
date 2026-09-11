@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>ГРИБНИК — симулятор тихой охоты</title>
+<meta name="description" content="3D-симулятор сбора грибов: множители за скорость, растущая тара, медведь-коррида и хариус.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🍄</text></svg>">
+<link rel="stylesheet" href="styles.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.168.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.168.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+
+<canvas id="c"></canvas>
+
+<!-- ============ ЭКРАН СТАРТА ============ -->
+<div id="screen-start" class="screen">
+  <div class="panel start">
+    <div class="brand">
+      <div class="logo">🍄</div>
+      <div>
+        <h1>ГРИБНИК</h1>
+        <p class="sub">симулятор тихой охоты</p>
+      </div>
+    </div>
+
+    <div class="login">
+      <label for="nick">Твой ник — под ним попадёшь на доску</label>
+      <div class="row">
+        <input id="nick" type="text" maxlength="16" placeholder="Например: Дед_Боровик" autocomplete="off" spellcheck="false">
+        <button id="btn-play" class="primary">В ЛЕС →</button>
+      </div>
+      <div id="start-msg" class="msg"></div>
+    </div>
+
+    <div class="cols">
+      <div class="col">
+        <h3>Как играть</h3>
+        <ul class="keys">
+          <li><b>WASD</b> идти · <b>Shift</b> бежать</li>
+          <li><b>ЛКМ</b> сорвать гриб / ударить / выстрелить</li>
+          <li><b>Пробел</b> <em>рывок в сторону</em> — так уходят от зверя</li>
+          <li><b>E</b> сдать грибы / взять находку</li>
+          <li><b>1</b> нож · <b>2</b> ТТ · <b>R</b> перезарядка · <b>ПКМ</b> сменить</li>
+          <li><b>Esc</b> пауза</li>
+        </ul>
+        <div class="rules">
+          <p><b>День — 12 минут.</b> Собирай быстро: каждый гриб подряд поднимает множитель до ×5.</p>
+          <p>Полную тару сдавай в приёмном пункте (жёлтый луч, метка на радаре) — взамен дадут больше: корзина → ведро → рюкзак → тележка → прицеп.</p>
+          <p><b>Зверь.</b> Когда он роет землю и ревёт — он уже выбрал траекторию. Стой, жди, и в последний момент — <b>Пробел</b> в сторону. Пробежит мимо: <span class="ole">¡OLÉ!</span> и множитель. Медведь бьёт насмерть.</p>
+          <p class="dim">Ядовитые грибы сбрасывают серию. Гигантский мухомор лучше не трогать. Совсем.</p>
+        </div>
+      </div>
+
+      <div class="col">
+        <h3 id="tab-board">Доска рекордов</h3>
+        <div id="board-src" class="src"></div>
+        <div id="board" class="board"></div>
+
+        <h3 class="mt">Настройки</h3>
+        <div class="settings">
+          <label>Чувствительность мыши <span id="sens-val"></span>
+            <input id="sens" type="range" min="0.3" max="2.5" step="0.05">
+          </label>
+          <label>Звук <span id="vol-val"></span>
+            <input id="vol" type="range" min="0" max="1" step="0.05">
+          </label>
+          <label>Качество
+            <select id="quality">
+              <option value="high">Высокое</option>
+              <option value="low">Слабый ПК</option>
+            </select>
+          </label>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ HUD ============ -->
+<div id="hud" hidden>
+  <div id="vignette"></div>
+  <div id="hurt"></div>
+
+  <div id="danger">
+    <div id="threat-ring"></div>
+    <div id="danger-text"></div>
+  </div>
+
+  <div class="top">
+    <div class="timerbox">
+      <div id="timer">12:00</div>
+      <div class="bar"><div id="timer-fill"></div></div>
+    </div>
+  </div>
+
+  <canvas id="radar" width="132" height="132"></canvas>
+
+  <div id="combo" class="combo">
+    <div class="x">×1.00</div>
+    <div class="streak">серия</div>
+    <div class="bar"><div id="combo-fill"></div></div>
+  </div>
+
+  <div class="bl">
+    <div class="scorebox">
+      <div id="score">0</div>
+      <div id="score-banked">сдано 0</div>
+    </div>
+    <div class="basket">
+      <div id="basket-icon">🧺</div>
+      <div class="bwrap">
+        <div class="brow"><span id="basket-name">Корзина</span><span id="basket-count">0/14</span></div>
+        <div class="bar"><div id="basket-fill"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="br">
+    <div class="vit">
+      <div class="vrow"><span class="lbl">ХП</span><div class="bar hp"><div id="hp-fill"></div></div><span id="hp-num">100</span></div>
+      <div class="vrow"><span class="lbl">СИЛЫ</span><div class="bar st"><div id="st-fill"></div></div></div>
+    </div>
+    <div class="weap">
+      <span id="weapon-name">🔪 Нож</span>
+      <span id="weapon-ammo" class="ammo hint"></span>
+    </div>
+  </div>
+
+  <div id="crosshair" class="ch"><i></i></div>
+  <div id="prompt" hidden></div>
+  <div id="toasts"></div>
+
+  <div id="banner" class="banner">
+    <div id="banner-title"></div>
+    <div id="banner-sub"></div>
+  </div>
+</div>
+
+<!-- ============ ИТОГИ ДНЯ ============ -->
+<div id="screen-end" class="screen" hidden>
+  <div class="panel end">
+    <h2 id="end-title">ВЕЧЕР</h2>
+    <div id="end-sub" class="endsub"></div>
+    <div id="end-body"></div>
+    <h3>Доска рекордов</h3>
+    <div id="end-board" class="board"></div>
+    <div class="btns">
+      <button id="btn-again" class="primary">ЕЩЁ ОДИН ДЕНЬ</button>
+      <button id="btn-menu">В меню</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ ПАУЗА ============ -->
+<div id="screen-pause" class="screen" hidden>
+  <div class="panel pause">
+    <h2>ПАУЗА</h2>
+    <p class="dim">Лес подождёт. Грибы — нет.</p>
+    <div class="btns">
+      <button id="btn-resume" class="primary">ПРОДОЛЖИТЬ</button>
+      <button id="btn-quit">Сдаться и выйти в меню</button>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="js/main.js"></script>
+<script>
+// Если игру открыли двойным кликом по файлу, браузер запретит
+// загрузку ES-модулей и экран останется пустым. Объясним, что делать.
+setTimeout(function () {
+  if (window.__game) return;
+  var d = document.createElement('div');
+  d.style.cssText = 'position:fixed;inset:0;z-index:99;display:flex;align-items:center;' +
+    'justify-content:center;padding:30px;background:#0d1410;color:#e8f0dc;' +
+    "font-family:'Segoe UI',system-ui,sans-serif;text-align:center;line-height:1.7";
+  d.innerHTML = '<div><h2 style="color:#ffcd5a">Игра не запустилась</h2>' +
+    (location.protocol === 'file:'
+      ? '<p>Похоже, файл открыт напрямую с диска. Браузер запрещает так загружать модули.<br>' +
+        'Запусти в папке с игрой локальный сервер:</p>' +
+        '<p><code style="background:#000;padding:8px 14px;border-radius:8px;display:inline-block">' +
+        'python -m http.server 8000</code></p>' +
+        '<p>и открой <b>http://localhost:8000</b></p>'
+      : '<p>Не удалось загрузить Three.js с CDN. Проверь интернет и обнови страницу.</p>') +
+    '</div>';
+  document.body.appendChild(d);
+}, 7000);
+</script>
+</body>
+</html>
