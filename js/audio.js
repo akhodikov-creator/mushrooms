@@ -226,6 +226,18 @@ export const Audio = {
     ambientNodes = null;
   },
 
+  /** Далёкий раскат — только в дождь, редко. */
+  thunder() {
+    this.noise({ dur: 2.4, gain: 0.16, type: 'lowpass', freq: 320, sweepTo: 70 });
+    this.tone({ freq: 44, to: 24, dur: 2.0, type: 'sine', gain: 0.14, delay: 0.1 });
+    this.noise({ dur: 0.7, gain: 0.07, type: 'bandpass', freq: 180, q: 0.6, delay: 0.6 });
+  },
+
+  lampClick() {
+    this.noise({ dur: 0.03, gain: 0.1, type: 'highpass', freq: 3600 });
+    this.tone({ freq: 1400, to: 900, dur: 0.04, type: 'square', gain: 0.06 });
+  },
+
   /* ---------- дождь ---------- */
   setRain(level) {
     if (!ctx) return;

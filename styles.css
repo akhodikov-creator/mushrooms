@@ -369,6 +369,15 @@ ul.keys em{color:var(--gold);font-style:normal}
 }
 #weather.on{opacity:.9}
 
+/* налобник */
+#lamp{
+  position:absolute;left:50%;top:86px;transform:translateX(-50%);
+  font-size:12px;letter-spacing:.14em;text-transform:uppercase;
+  color:#ffe9a8;opacity:0;transition:opacity .25s;
+  text-shadow:0 2px 10px rgba(0,0,0,.9);
+}
+#lamp.on{opacity:.92}
+
 /* прицел */
 .ch{
   position:absolute;left:50%;top:50%;width:26px;height:26px;

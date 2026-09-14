@@ -35,6 +35,18 @@ export class Game {
     this.camera = new THREE.PerspectiveCamera(76, innerWidth / innerHeight, 0.05, 700);
     this.scene.add(this.camera);
 
+    // Налобник. Прожектор висит на камере и светит туда же, куда
+    // смотрит игрок. Тени от него намеренно выключены — вторая
+    // теневая карта стоит дороже, чем выглядит.
+    // Интенсивность в сотнях — не опечатка: в three.js прожектор
+    // физический, и при затухании 3.4 «свечи» не видно ничего.
+    this.lamp = new THREE.SpotLight(0xffeccc, 0, 60, 0.52, 0.6, 1.0);
+    this.lamp.position.set(0.04, 0.05, 0);
+    this.lamp.target.position.set(0, -0.05, -1);
+    this.camera.add(this.lamp, this.lamp.target);
+    this.lampOn = false;
+    this.lampLevel = 0;
+
     this.world = new World(this.scene);
     const env = applyEnvMap(this.renderer, this.scene);
     applyWeaponEnv(env);
@@ -111,7 +123,7 @@ export class Game {
           if (!this.weapons.select('pistol') && !this.weapons.has.pistol)
             UI.toast('Пистолета нет. Может, найдётся в лесу…', 'warn');
           break;
-        case 'KeyF': this._primary(); break;
+        case 'KeyF': this._toggleLamp(); break;
         case 'Tab': e.preventDefault(); this._toggleBag(); break;
       }
     });
@@ -140,6 +152,23 @@ export class Game {
       return;
     }
     this.weapons.attack(this.player, (r) => this._onWeaponHit(r));
+  }
+
+  _toggleLamp() {
+    this.lampOn = !this.lampOn;
+    Audio.lampClick();
+    UI.setLamp(this.lampOn);
+    if (this.lampOn) this.sched.lampHint = true;   // подсказку больше не показываем
+  }
+
+  /** Разгорается и гаснет плавно — щелчок «в ноль» выглядит дёшево. */
+  _updateLamp(dt) {
+    const want = this.lampOn ? 1 : 0;
+    this.lampLevel = dampTo(this.lampLevel, want, 9, dt);
+    // лёгкое дрожание накала, как у налобника на ходу
+    const flick = 1 + Math.sin(this.dayT * 37) * 0.02 + Math.sin(this.dayT * 91) * 0.012;
+    this.lamp.intensity = this.lampLevel * 120 * flick;
+    this.lamp.visible = this.lampLevel > 0.01;
   }
 
   _toggleBag() {
@@ -553,6 +582,18 @@ export class Game {
       }
     }
 
+    // --- стемнело: подсказать про фонарь ---
+    if (!S.lampHint && (this.world.night || 0) > 0.22) {
+      S.lampHint = true;
+      UI.banner('СТЕМНЕЛО', 'F — включить налобник', 3000, 'info');
+    }
+
+    // --- гроза в дождь ---
+    if (this.world.weather === 'rain' && t >= (S.nextThunder || 0)) {
+      S.nextThunder = t + 18 + Math.random() * 40;
+      if ((this.world.wet || 0) > 0.5) Audio.thunder();
+    }
+
     // сапоги выдыхаются
     if (this.bootsT > 0) {
       this.bootsT -= dt;
@@ -632,6 +673,10 @@ export class Game {
     this.lastKiller = null;
     this.radarRange = 130;
     this.noise = 1;
+    this.lampOn = false;
+    this.lampLevel = 0;
+    this.lamp.intensity = 0;
+    UI.setLamp(false);
     this.world.setWeather('clear');
     UI.setWeather('');
     this.slowmoT = 0;
@@ -823,6 +868,7 @@ export class Game {
     // шум тары: вёдра гремят, звери находят быстрее. Плащ глушит.
     this.noise = this.inv.noiseFactor * (this.effects.some((e) => e.id === 'raincoat') ? 0.55 : 1);
     this._updateEffects(dt);
+    this._updateLamp(dt);
     p.update(dt, this.world);
     this.body.update(dt, p, this.inv, this.weapons);
     this.inv.update(dt);

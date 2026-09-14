@@ -17,7 +17,7 @@ export const UI = {
       'radar', 'hp-num', 'tab-board', 'btn-again', 'btn-menu', 'btn-resume', 'btn-quit',
       'sens', 'sens-val', 'vol', 'vol-val', 'quality', 'vignette', 'end-sub', 'threat-ring',
       'level-num', 'level-fill', 'buffs', 'threat-arrow', 'radar-label', 'now-cue',
-      'bag', 'bag-body', 'bag-cap', 'weather',
+      'bag', 'bag-body', 'bag-cap', 'weather', 'lamp',
     ];
     for (const id of ids) this.el[id] = $(id);
     this.radarCtx = this.el.radar ? this.el.radar.getContext('2d') : null;
@@ -150,6 +150,14 @@ export const UI = {
   },
 
   hideBag() { this.el.bag.hidden = true; },
+
+  /** Индикатор налобника. */
+  setLamp(on) {
+    const el = this.el.lamp;
+    if (!el) return;
+    el.classList.toggle('on', on);
+    el.textContent = on ? '🔦 налобник' : '';
+  },
 
   /** Строка погоды в углу. */
   setWeather(text) {

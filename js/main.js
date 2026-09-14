@@ -3,6 +3,7 @@ import { Audio } from './audio.js';
 import { UI } from './ui.js';
 import { Leaderboard } from './leaderboard.js';
 import { Game } from './game.js';
+import { warmAssets } from './assets.js';
 
 UI.init();
 
@@ -18,6 +19,9 @@ if (CONFIG.quality === 'low') {
   CONFIG.fogFar = 165;
   CONFIG.grassPerChunk = 260;
 }
+
+// Внешние модели тянем в фоне: пока их нет, играем на процедурных.
+warmAssets();
 
 const game = new Game();
 window.__game = game;   // для отладки из консоли

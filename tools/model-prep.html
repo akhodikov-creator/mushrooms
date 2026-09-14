@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><title>convert</title>
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.168.0/build/three.module.js",
+"three/addons/":"https://cdn.jsdelivr.net/npm/three@0.168.0/examples/jsm/"}}
+</script></head><body style="background:#111;color:#9fb;font:13px monospace">
+<pre id="out">жду команды: window.__convertFeet()</pre>
+<script type="module">
+import * as THREE from 'three';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+
+const log = (t) => { document.getElementById('out').textContent += '\n' + t; };
+
+/**
+ * Прореживание кластеризацией по сетке.
+ *
+ * Скульпт из ZBrush приходит с сотнями тысяч вершин — для ступни,
+ * которую видно с полутора метров, это на два порядка больше нужного.
+ * Вершины сгоняются в ячейки сетки, каждая ячейка становится одной
+ * вершиной, треугольники с совпавшими углами выбрасываются.
+ * Для органической формы этого достаточно, а считается за один проход.
+ */
+function decimate(geo, target) {
+  const src = geo.index ? geo.toNonIndexed() : geo;
+  const pos = src.attributes.position.array;
+  const n = pos.length / 3;
+
+  const bb = new THREE.Box3().setFromBufferAttribute(src.attributes.position);
+  const size = bb.getSize(new THREE.Vector3());
+
+  // подбираем шаг сетки: хотим примерно target вершин на выходе
+  let cell = Math.cbrt((size.x * size.y * size.z) / target) * 0.8;
+  let map = null, cells = null;
+  for (let pass = 0; pass < 12; pass++) {
+    map = new Int32Array(n);
+    cells = new Map();
+    for (let i = 0; i < n; i++) {
+      const cx = Math.floor((pos[i * 3] - bb.min.x) / cell);
+      const cy = Math.floor((pos[i * 3 + 1] - bb.min.y) / cell);
+      const cz = Math.floor((pos[i * 3 + 2] - bb.min.z) / cell);
+      const key = cx * 4194304 + cy * 2048 + cz;
+      let c = cells.get(key);
+      if (c === undefined) { c = cells.size; cells.set(key, c); }
+      map[i] = c;
+    }
+    const k = cells.size / target;
+    if (k > 0.75 && k < 1.4) break;
+    cell *= Math.cbrt(k);
+  }
+
+  // средняя точка каждой ячейки — так форма не «дрожит» по сетке
+  const m = cells.size;
+  const acc = new Float64Array(m * 3), cnt = new Uint32Array(m);
+  for (let i = 0; i < n; i++) {
+    const c = map[i];
+    acc[c * 3] += pos[i * 3]; acc[c * 3 + 1] += pos[i * 3 + 1]; acc[c * 3 + 2] += pos[i * 3 + 2];
+    cnt[c]++;
+  }
+  const out = new Float32Array(m * 3);
+  for (let c = 0; c < m; c++) {
+    out[c * 3] = acc[c * 3] / cnt[c];
+    out[c * 3 + 1] = acc[c * 3 + 1] / cnt[c];
+    out[c * 3 + 2] = acc[c * 3 + 2] / cnt[c];
+  }
+
+  // Повторы после слияния не выкидываем: одинаковые треугольники
+  // не видны, а вот отсев по неупорядоченному ключу заодно убивал
+  // соседний треугольник с обратным обходом — и в стопе появлялись дырки.
+  const idx = [];
+  for (let t = 0; t < n; t += 3) {
+    const a = map[t], b = map[t + 1], c = map[t + 2];
+    if (a === b || b === c || a === c) continue;      // схлопнулся в ребро
+    idx.push(a, b, c);
+  }
+
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(out, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return { geo: g, verts: m, tris: idx.length / 3 };
+}
+
+window.__convertFeet = async () => {
+  const root = await new Promise((ok, no) => new FBXLoader().load('../assets/feet.fbx', ok, undefined, no));
+  let mesh = null;
+  root.traverse((o) => { if (!mesh && o.isMesh) mesh = o; });
+  root.updateWorldMatrix(true, true);
+
+  let geo = mesh.geometry.clone();
+  geo.applyMatrix4(mesh.matrixWorld);
+  log('исходно вершин: ' + geo.attributes.position.count);
+
+  const d = decimate(geo, 3200);
+  log('после прореживания: ' + d.verts + ' вершин, ' + d.tris + ' треугольников');
+  geo = d.geo;
+
+  // где носок: у пятки над сводом поднимается щиколотка, поэтому
+  // высокий конец — задний
+  geo.computeBoundingBox();
+  const bb = geo.boundingBox, size = bb.getSize(new THREE.Vector3());
+  const p = geo.attributes.position.array;
+  let backHi = -1e9, frontHi = -1e9;
+  for (let i = 0; i < p.length; i += 3) {
+    const t = (p[i + 2] - bb.min.z) / size.z;
+    if (t > 0.8) frontHi = Math.max(frontHi, p[i + 1]);
+    if (t < 0.2) backHi = Math.max(backHi, p[i + 1]);
+  }
+  const toesTowardPlusZ = frontHi < backHi;
+  log('носок смотрит в ' + (toesTowardPlusZ ? '+Z' : '-Z') +
+      ' (высота: перед ' + frontHi.toFixed(2) + ', зад ' + backHi.toFixed(2) + ')');
+
+  // в игре ступня смотрит в -Z, стоит подошвой на нуле, по X по центру
+  const m = new THREE.Matrix4();
+  if (toesTowardPlusZ) m.makeRotationY(Math.PI);
+  const k = 0.268 / size.z;                       // длина ступни, м
+  m.premultiply(new THREE.Matrix4().makeScale(k, k, k));
+  geo.applyMatrix4(m);
+  geo.computeBoundingBox();
+  const b2 = geo.boundingBox, c2 = b2.getCenter(new THREE.Vector3());
+  geo.translate(-c2.x, -b2.min.y, -c2.z);
+  geo.computeBoundingBox();
+  const s2 = geo.boundingBox.getSize(new THREE.Vector3());
+  log('итоговый габарит, м: ' + [s2.x, s2.y, s2.z].map((v) => v.toFixed(3)).join(' x '));
+
+  const out = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: 0xffffff }));
+  out.name = 'foot';
+  const glb = await new Promise((ok, no) =>
+    new GLTFExporter().parse(out, ok, no, { binary: true }));
+  log('GLB: ' + (glb.byteLength / 1024).toFixed(0) + ' КБ');
+
+  const r = await fetch('/assets/feet.glb', { method: 'PUT', body: glb });
+  log('сохранено: ' + r.status + ' ' + (await r.text()));
+  return { verts: d.verts, tris: d.tris, kb: Math.round(glb.byteLength / 1024) };
+};
+log('готово к работе');
+</script></body></html>

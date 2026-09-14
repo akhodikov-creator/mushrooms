@@ -3,7 +3,7 @@ import { mergeParts } from './geo.js';
 import { CONFIG } from './config.js';
 import {
   WS, TAU, rng, terrainHeight, terrainSlope, moisture, isWater, WATER_LEVEL,
-  wrapDelta, wrapCoord, clamp, lerp, dampTo,
+  wrapDelta, wrapCoord, clamp, lerp, dampTo, torusDist2,
 } from './utils.js';
 import {
   generateChunkMushrooms, getMushroomGeometry,
@@ -13,6 +13,7 @@ import {
   groundTex, barkTex, birchTex, grassTex, leafTex, needleTex,
   metalTex, woodTex, getEnvMap,
 } from './textures.js';
+import { onAsset, instance } from './assets.js';
 
 const CS = CONFIG.chunkSize;
 const GRID = Math.round(WS / CS);          // 8
@@ -253,7 +254,9 @@ function buildAspen() {
 function buildGrassTuft() {
   const p = [];
   for (let i = 0; i < 3; i++) {
-    const hgt = 0.5 + Math.random() * 0.42;
+    // Раньше трава была 50–92 см при высоте гриба 12–16 см: шляпка
+    // тонула гарантированно. Лесная подстилка и правда ниже.
+    const hgt = 0.24 + Math.random() * 0.22;
     const wid = hgt * 0.85;
     const g = new THREE.PlaneGeometry(wid, hgt, 1, 3);
     const pos = g.attributes.position;
@@ -531,6 +534,13 @@ class Chunk {
       const wet = moisture(wx, wz);
       if (wet < 0.3 && rnd() < 0.72) continue;                  // поляны остаются открытыми
       if (terrainSlope(wx, wz) > 0.6) continue;
+      // Вокруг приёмного пункта — поляна. Иначе ель вырастает прямо
+      // в кузове «Буханки» и заслоняет весь лагерь.
+      let atCamp = false;
+      for (const cp of CAMPS) {
+        if (torusDist2(wx, wz, cp.x, cp.z) < 12 * 12) { atCamp = true; break; }
+      }
+      if (atCamp) continue;
       let t;
       const r = rnd();
       if (wet > 0.62) t = r < 0.55 ? 'spruce' : r < 0.8 ? 'birch' : 'aspen';
@@ -706,7 +716,7 @@ class Chunk {
       const mesh = new THREE.Mesh(geo, MAT_MUSHROOM);
       const y = d.onStump
         ? terrainHeight(this.baseX + d.onStump.x, this.baseZ + d.onStump.z) + 0.5
-        : terrainHeight(this.baseX + d.lx, this.baseZ + d.lz) - 0.015;
+        : terrainHeight(this.baseX + d.lx, this.baseZ + d.lz) - 0.004;
       mesh.position.set(d.lx, y, d.lz);
       mesh.rotation.set(d.tilt * 0.7, d.rot, d.tilt);
       mesh.visible = false;
@@ -758,6 +768,25 @@ export class World {
       this.campGroups.push({ g, camp: c });
       this.root.add(g);
     }
+
+    // Скупщик появится, когда подгрузится модель. Пока её нет, пункт
+    // просто стоит пустой — как и раньше.
+    onAsset('buyer', () => {
+      for (const { g } of this.campGroups) {
+        const man = instance('buyer');
+        if (!man) continue;
+        // между палаткой и костром, лицом наружу — за «Буханкой» его
+        // не видно, а это единственный живой человек в лесу
+        man.position.set(-1.6, 0, 3.2);
+        man.rotation.y = 0.35;
+        // Загрузчик выключает отсечение (это нужно моделям в руках),
+        // но скупщик — обычный объект мира: пусть его отсекает пирамида,
+        // иначе четыре пункта рисуются всегда, даже за спиной.
+        man.traverse((o) => { if (o.isMesh) o.frustumCulled = true; });
+        g.add(man);
+        g.userData.buyer = man;
+      }
+    });
 
     this._buildSky();
     this._buildMidges();
@@ -854,10 +883,39 @@ export class World {
     this._ngAxis = new THREE.Vector3(0, 1, 0);
   }
 
+  /**
+   * Карта проплешин: где стоит гриб, трава не растёт. Каждый гриб
+   * попадает максимум в четыре метровых ячейки, поэтому травинке
+   * достаточно одного поиска по своей ячейке.
+   */
+  _bareSpots(px, pz, R) {
+    const map = new Map();
+    const CLR = 0.42;
+    for (const ch of this.chunks.values()) {
+      if (!ch.built || !ch.group.visible) continue;
+      const gx = ch.group.position.x, gz = ch.group.position.z;
+      for (const m of ch.mushrooms) {
+        if (m.picked) continue;
+        const wx = gx + m.mesh.position.x, wz = gz + m.mesh.position.z;
+        if (Math.abs(wx - px) > R + 1 || Math.abs(wz - pz) > R + 1) continue;
+        for (let ix = Math.floor(wx - CLR); ix <= Math.floor(wx + CLR); ix++) {
+          for (let iz = Math.floor(wz - CLR); iz <= Math.floor(wz + CLR); iz++) {
+            const key = ix + ',' + iz;
+            let arr = map.get(key);
+            if (!arr) { arr = []; map.set(key, arr); }
+            arr.push(wx, wz);
+          }
+        }
+      }
+    }
+    return map;
+  }
+
   _updateNearGrass(px, pz) {
     if (Math.hypot(px - this._ngX, pz - this._ngZ) < 2) return;
     this._ngX = px; this._ngZ = pz;
     const R = this.ngR, R2 = R * R;
+    const bare = this._bareSpots(px, pz, R);
     const im = this.nearGrass;
     const m4 = this._ngM, q = this._ngQ, v = this._ngV, sc = this._ngS, col = this._ngC;
     const i0 = Math.floor(px - R), i1 = Math.ceil(px + R);
@@ -877,6 +935,16 @@ export class World {
         if (r3 < 0.22) continue;                       // проплешины
         const wx = i + r1, wz = j + r2;
         if (isWater(wx, wz)) continue;
+        // не заслоняем грибы
+        const spots = bare.get(i + ',' + j);
+        if (spots) {
+          let blocked = false;
+          for (let k = 0; k < spots.length; k += 2) {
+            const dx2 = wx - spots[k], dz2 = wz - spots[k + 1];
+            if (dx2 * dx2 + dz2 * dz2 < 0.1764) { blocked = true; break; }
+          }
+          if (blocked) continue;
+        }
         const wet = moisture(wx, wz);
         const s = (wet < 0.34 ? 1.3 : 0.95) * (0.65 + r3 * 0.8);
         q.setFromAxisAngle(this._ngAxis, r1 * TAU);
@@ -901,10 +969,12 @@ export class World {
         bottom: { value: new THREE.Color(0xcfd8c8) },
         sunDir: { value: new THREE.Vector3(0, 1, 0) },
         sunCol: { value: new THREE.Color(0xffe6b0) },
+        night: { value: 0 },
       },
       vertexShader: `varying vec3 vP; void main(){ vP = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);} `,
       fragmentShader: `
         uniform vec3 top; uniform vec3 bottom; uniform vec3 sunDir; uniform vec3 sunCol;
+        uniform float night;
         varying vec3 vP;
         void main(){
           vec3 d = normalize(vP);
@@ -913,6 +983,14 @@ export class World {
           float s = max(0.0, dot(d, normalize(sunDir)));
           col += sunCol * pow(s, 22.0) * 1.5;
           col += sunCol * pow(s, 4.0) * 0.18;
+
+          // звёзды: хеш по направлению, проступают только к ночи
+          if (night > 0.01 && d.y > 0.0) {
+            vec3 cell = floor(d * 260.0);
+            float h = fract(sin(dot(cell, vec3(12.9898, 78.233, 45.164))) * 43758.5453);
+            float star = smoothstep(0.9972, 1.0, h);
+            col += vec3(star) * night * smoothstep(0.0, 0.35, d.y) * 1.4;
+          }
           gl_FragColor = vec4(col, 1.0);
         }`,
       side: THREE.BackSide, depthWrite: false, fog: false,
@@ -987,11 +1065,26 @@ export class World {
     const topDay = new THREE.Color(0x4a86c4), topDusk = new THREE.Color(0x2a2c50);
     const botDay = new THREE.Color(0xd6dcc8), botDusk = new THREE.Color(0x8a6a58);
     const dl = clamp((t - 0.7) / 0.3, 0, 1);
-    this.skyMat.uniforms.top.value.copy(topDay).lerp(topDusk, dl);
-    this.skyMat.uniforms.bottom.value.copy(botDay).lerp(botDusk, dl);
+    const nt = clamp((t - 0.8) / 0.2, 0, 1);
+    this.skyMat.uniforms.top.value.copy(topDay).lerp(topDusk, dl)
+      .lerp(new THREE.Color(0x070a18), nt);
+    this.skyMat.uniforms.bottom.value.copy(botDay).lerp(botDusk, dl)
+      .lerp(new THREE.Color(0x141020), nt);
 
     this.hemi.intensity = 1.15 - dl * 0.55;
     this.ambient.intensity = 0.42 - dl * 0.16;
+
+    // Последняя пятая часть дня — настоящая темнота, иначе фонарь
+    // не имеет смысла: и так всё видно.
+    const night = clamp((t - 0.8) / 0.2, 0, 1);
+    this.night = night;
+    if (night > 0) {
+      const k = 1 - night * 0.94;
+      this.sun.intensity *= k;
+      this.hemi.intensity *= 1 - night * 0.86;
+      this.ambient.intensity *= 1 - night * 0.8;
+    }
+    this.skyMat.uniforms.night.value = night;
 
     const fogDay = new THREE.Color(0xa8b8a0), fogDusk = new THREE.Color(0x4a4258);
     scene.fog.color.copy(fogDay).lerp(fogDusk, dl);
@@ -1004,6 +1097,10 @@ export class World {
       scene.fog.color.lerp(grey, wf * 0.6);
       this.sun.intensity *= 1 - wf * 0.55;
       this.hemi.intensity *= 1 - wf * 0.2;
+    }
+    if (night > 0.01) {
+      scene.fog.color.lerp(new THREE.Color(0x0a0e18), night * 0.9);
+      scene.fog.far *= 1 - night * 0.45;
     }
     this.dusk = dl;
   }
@@ -1032,6 +1129,13 @@ export class World {
       const ox = px + wrapDelta(camp.x - px);
       const oz = pz + wrapDelta(camp.z - pz);
       g.position.set(ox, terrainHeight(camp.x, camp.z), oz);
+      // Скупщик стоит во всех четырёх пунктах, но модель тяжёлая:
+      // показываем только того, к кому реально можно подойти.
+      if (g.userData.buyer) {
+        const d = Math.hypot(ox - px, oz - pz);
+        g.userData.buyer.visible = d < 120;
+      }
+
       const f = g.userData.flame;
       if (f) {
         const s = 0.82 + Math.sin(this.time * 11) * 0.12 + Math.sin(this.time * 23) * 0.07;
@@ -1043,9 +1147,14 @@ export class World {
     this._updateWeather(dt, px, pz);
     this._updateNearGrass(px, pz);
 
-    // мошкара следует за игроком
+    // мошкара следует за игроком, а к ночи становится светлячками
     this.midges.position.set(px, terrainHeight(px, pz), pz);
     this.midges.rotation.y = this.time * 0.06;
+    const nt = this.night || 0;
+    const mm = this.midges.material;
+    mm.size = 0.055 + nt * 0.075;
+    mm.opacity = 0.45 + nt * 0.5;
+    mm.color.setRGB(1, 0.94 - nt * 0.1, 0.75 - nt * 0.45);
 
     if (this.sky) this.sky.position.set(px, 0, pz);
     this.sun.target.position.set(px, 0, pz);
@@ -1080,7 +1189,7 @@ export class World {
         const vis = d2 < showR2;
         m.mesh.visible = vis;
         // «грибное чутьё»: близкие грибы чуть светятся, иначе трава их прячет
-        if (vis) m.mesh.material = d2 < 156 ? MAT_MUSHROOM_NEAR : MAT_MUSHROOM;
+        if (vis) m.mesh.material = d2 < 256 ? MAT_MUSHROOM_NEAR : MAT_MUSHROOM;
         if (m.light) m.light.visible = vis && dx * dx + dz * dz < 900;
       }
     }

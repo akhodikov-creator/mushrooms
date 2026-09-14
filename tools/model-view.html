@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><title>view</title>
+<style>html,body{margin:0;background:#111}canvas{display:block}
+#l{position:fixed;left:8px;top:6px;color:#9fb;font:12px monospace;white-space:pre}</style>
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.168.0/build/three.module.js",
+"three/addons/":"https://cdn.jsdelivr.net/npm/three@0.168.0/examples/jsm/"}}
+</script></head><body>
+<div id="l">загрузка…</div>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const url = new URLSearchParams(location.search).get('url') || '../assets/feet.glb';
+const W = 1000, H = 700;
+const r = new THREE.WebGLRenderer({ antialias: true });
+r.setPixelRatio(1); r.setSize(W, H); r.setScissorTest(true);
+document.body.appendChild(r.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x181c22);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 2.0));
+const d = new THREE.DirectionalLight(0xffffff, 2.2); d.position.set(0.6, 1, 0.5); scene.add(d);
+const d2 = new THREE.DirectionalLight(0xffffff, 0.9); d2.position.set(-0.5, 0.2, -0.6); scene.add(d2);
+
+const cams = [];
+for (let i = 0; i < 4; i++) cams.push(new THREE.PerspectiveCamera(34, (W / 2) / (H / 2), 0.005, 20));
+
+new GLTFLoader().load(url, (g) => {
+  const obj = g.scene;
+  obj.traverse((o) => { if (o.isMesh) o.material = new THREE.MeshStandardMaterial({ color: 0xb08050, roughness: 0.85 }); });
+  scene.add(obj);
+  const b = new THREE.Box3().setFromObject(obj);
+  const c = b.getCenter(new THREE.Vector3());
+  const s = b.getSize(new THREE.Vector3());
+  const R = Math.max(s.x, s.y, s.z) * 2.1;
+  const put = (i, dx, dy, dz, up) => {
+    cams[i].position.set(c.x + dx * R, c.y + dy * R, c.z + dz * R);
+    cams[i].up.set(...up); cams[i].lookAt(c); cams[i].updateProjectionMatrix();
+  };
+  put(0, 0, 0.99, 0.02, [0, 0, -1]);     // сверху
+  put(1, 0.99, 0.15, 0, [0, 1, 0]);      // сбоку +X
+  put(2, 0, 0.1, -0.99, [0, 1, 0]);      // спереди (носок к нам)
+  put(3, 0.6, 0.5, -0.6, [0, 1, 0]);     // три четверти
+  draw();
+  let tris = 0; obj.traverse((o) => { if (o.isMesh) tris += o.geometry.index ? o.geometry.index.count / 3 : o.geometry.attributes.position.count / 3; });
+  document.getElementById('l').textContent =
+    url + '\n габарит, м: ' + [s.x, s.y, s.z].map((v) => v.toFixed(3)).join(' x ') +
+    '\n треугольников: ' + tris +
+    '\n↖ сверху   ↗ сбоку +X\n↙ спереди  ↘ три четверти';
+}, undefined, (e) => { document.getElementById('l').textContent = 'ошибка: ' + e; });
+
+function draw() {
+  r.setViewport(0, 0, W, H); r.setScissor(0, 0, W, H); r.setClearColor(0x181c22, 1); r.clear();
+  const q = [[0, H / 2], [W / 2, H / 2], [0, 0], [W / 2, 0]];
+  cams.forEach((c, i) => {
+    r.setViewport(q[i][0], q[i][1], W / 2, H / 2);
+    r.setScissor(q[i][0] + 1, q[i][1] + 1, W / 2 - 2, H / 2 - 2);
+    r.render(scene, c);
+  });
+}
+</script></body></html>

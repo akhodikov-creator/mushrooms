@@ -2,6 +2,9 @@ import * as THREE from 'three';
 import { mergeParts } from './geo.js';
 import { Audio } from './audio.js';
 import { metalTex, woodTex, skinTex, clothTex } from './textures.js';
+import { buildHandGeometry } from './handmesh.js';
+import { onAsset, instance, poseHandBones } from './assets.js';
+import { ASSETS } from './config.js';
 import { MAT_MUSHROOM as MAT_HARVEST } from './mushrooms.js';
 import { clamp, dampTo, lerp } from './utils.js';
 
@@ -29,7 +32,10 @@ const VM = {
     vertexColors: true, roughness: 0.94, metalness: 0.0,
   }),
   skin: new THREE.MeshStandardMaterial({
-    vertexColors: true, map: skinTex(), roughness: 0.78, metalness: 0.0,
+    map: skinTex(), roughness: 0.74, metalness: 0.0,
+  }),
+  nail: new THREE.MeshStandardMaterial({
+    color: 0xdcb49e, roughness: 0.28, metalness: 0.0,
   }),
   cloth: new THREE.MeshStandardMaterial({
     vertexColors: true, map: clothTex(), roughness: 0.95, metalness: 0.0,
@@ -39,7 +45,7 @@ const VM = {
 export function applyWeaponEnv(env) {
   for (const m of Object.values(VM)) {
     m.envMap = env;
-    m.envMapIntensity = (m === VM.skin || m === VM.cloth) ? 0.35 : 1.35;
+    m.envMapIntensity = (m === VM.skin || m === VM.cloth || m === VM.nail) ? 0.35 : 1.35;
     m.needsUpdate = true;
   }
 }
@@ -69,118 +75,141 @@ function assemble(groups) {
 }
 
 /* ============================================================
-   Кисть руки. Кулак обхватывает рукоять: ладонь, четыре пальца
-   поперёк, большой палец сбоку, запястье и манжета куртки.
-   Строится в локальных осях: рукоять идёт вдоль Z, ладонь под ней.
+   Кисть руки берётся из handmesh.js — там она собирается
+   меташарами в одну гладкую оболочку. Здесь только ставим её
+   на место и добавляем манжету куртки.
    ============================================================ */
-function buildHand(side = 1, pose = 'fist') {
-  const skin = [], cloth = [];
-  const SKIN = 0xffffff, SKIN2 = 0xe8d0c0;
 
-  // Ладонь. Игрок смотрит на кисть сзади-сверху, поэтому главное,
-  // что должно читаться, — тыльная сторона с костяшками.
-  const palm = new THREE.BoxGeometry(0.055, 0.05, 0.092, 3, 2, 3);
-  const pp = palm.attributes.position;
-  for (let i = 0; i < pp.count; i++) {
-    const x = pp.getX(i), y = pp.getY(i), z = pp.getZ(i);
-    const k = 1 - Math.abs(z / 0.046) * 0.16;      // скругление к краям
-    pp.setX(i, x * k);
-    pp.setY(i, y * k * (1 - Math.abs(x / 0.0275) * 0.12));
-  }
-  palm.computeVertexNormals();
-  palm.translate(side * 0.03, -0.004, 0);
-  skin.push(paint(palm, SKIN));
+/**
+ * Узел кисти. Сам узел несёт матрицу посадки, а внутри лежит либо
+ * процедурная кисть, либо подгруженная модель — так её можно
+ * заменить на лету, когда приедет .glb.
+ */
+function handSlot(side, pose, m) {
+  const node = new THREE.Group();
+  node.matrixAutoUpdate = false;
+  node.matrix.copy(m);
+  node.userData.hand = { side, pose };
+  fillHand(node);
 
-  // костяшки на тыльной стороне — именно они выдают кисть
-  for (let i = 0; i < (pose === 'fist' ? 4 : 0); i++) {
-    const z = -0.032 + i * 0.021;
-    const kn = new THREE.SphereGeometry(0.0115 - Math.abs(i - 1.3) * 0.0012, 8, 6);
-    kn.scale(0.8, 0.85, 1);
-    kn.translate(side * 0.052, 0.004, z);
-    skin.push(paint(kn, SKIN2));
-  }
+  // если для рук настроена внешняя модель — подменим, когда загрузится
+  onAsset('hands', () => fillHand(node));
+  return node;
+}
 
-  if (pose === 'fist') {
-    // Четыре пальца обхватывают рукоять снизу и выходят на дальнюю
-    // сторону — так виден и обхват, и просветы между пальцами.
-    for (let i = 0; i < 4; i++) {
-      const z = -0.032 + i * 0.021;
-      const len = 0.056 - Math.abs(i - 1.2) * 0.005;
-      const seg = new THREE.CylinderGeometry(0.0098, 0.0104, len, 9);
-      seg.rotateZ(Math.PI / 2);
-      seg.translate(side * (0.028 - len / 2), -0.026, z);
-      skin.push(paint(seg, SKIN));
-      const nail = new THREE.CylinderGeometry(0.0092, 0.0098, 0.019, 8);
-      nail.rotateZ(Math.PI / 2 - side * 0.9);
-      nail.translate(side * (0.03 - len), -0.020, z);
-      skin.push(paint(nail, SKIN2));
+/** Наполняет узел кисти: модель, если она есть, иначе процедурная. */
+function fillHand(node) {
+  const { side, pose } = node.userData.hand;
+  node.clear();
+
+  const model = instance('hands');
+  if (model) {
+    // Скачанная модель — всегда одна конкретная рука; вторая получается
+    // зеркалом. Какая именно пришла, записано в конфиге: определять на
+    // глаз бесполезно, кулак с обеих сторон выглядит одинаково.
+    const cfg = ASSETS.hands;
+    if (side !== (cfg.side || 1)) model.scale.x *= -1;
+    const curls = pose === 'fist' ? cfg.fistCurl : cfg.openCurl;
+    // знак сгиба от стороны не зависит: зеркало применяется к целой
+    // кисти вместе со скелетом и само переворачивает позу
+    const bones = poseHandBones(model, curls, cfg.bendAxis, cfg.bendSign);
+    if (!bones) {
+      console.info('[hands] в модели нет костей — поза остаётся как в файле');
     }
-    const th = new THREE.CylinderGeometry(0.0112, 0.0118, 0.056, 9);
-    th.rotateX(Math.PI / 2.2);
-    th.rotateZ(side * 0.42);
-    th.translate(side * 0.034, 0.014, -0.03);
-    skin.push(paint(th, SKIN));
-    const thTip = new THREE.SphereGeometry(0.0114, 8, 6);
-    thTip.translate(side * 0.018, 0.022, -0.056);
-    skin.push(paint(thTip, SKIN2));
-  } else {
-    // Раскрытая ладонь: пальцы вытянуты вперёд, чуть врозь —
-    // такой рукой и берут гриб.
-    for (let i = 0; i < 4; i++) {
-      const z = -0.032 + i * 0.021;
-      const len = 0.062 - Math.abs(i - 1.2) * 0.007;
-      const spread = (i - 1.5) * 0.055;
-      const f = new THREE.CylinderGeometry(0.0092, 0.0102, len, 9);
-      f.rotateX(Math.PI / 2);
-      f.rotateY(spread);
-      f.rotateZ(side * 0.06);
-      f.translate(side * 0.03 + spread * 0.05, -0.006, -0.046 - len / 2 + 0.01);
-      skin.push(paint(f, SKIN));
-      const tip = new THREE.SphereGeometry(0.0094, 8, 6);
-      tip.translate(side * 0.03 + spread * 0.09, -0.006, -0.05 - len);
-      skin.push(paint(tip, SKIN2));
-    }
-    // большой палец отставлен в сторону
-    const th = new THREE.CylinderGeometry(0.0112, 0.012, 0.05, 9);
-    th.rotateX(Math.PI / 2.1);
-    th.rotateZ(side * 1.0);
-    th.translate(side * 0.05, -0.004, -0.03);
-    skin.push(paint(th, SKIN));
-    const thTip = new THREE.SphereGeometry(0.0114, 8, 6);
-    thTip.translate(side * 0.072, -0.002, -0.055);
-    skin.push(paint(thTip, SKIN2));
+    node.add(model);
+    return;
   }
 
-  // запястье уходит назад-вниз, к камере
-  const wrist = new THREE.CylinderGeometry(0.028, 0.032, 0.07, 12);
-  wrist.rotateX(Math.PI / 2);
-  wrist.rotateY(side * 0.16);
-  wrist.translate(side * 0.032, -0.010, 0.080);
-  skin.push(paint(wrist, SKIN));
+  const src = buildHandGeometry(side, pose);
+  node.add(new THREE.Mesh(src.skin, VM.skin));
+  node.add(new THREE.Mesh(src.nails, VM.nail));
+}
 
-  // манжета брезентовой куртки
-  const cuff = new THREE.CylinderGeometry(0.036, 0.040, 0.055, 12);
+/**
+ * Манжета и обрез рукава, поставленные матрицей m.
+ * Рукав строится вдоль +Z и уходит от запястья назад.
+ */
+function sleeveAt(m) {
+  const out = [];
+  const cuff = new THREE.CylinderGeometry(0.040, 0.045, 0.055, 14);
   cuff.rotateX(Math.PI / 2);
-  cuff.rotateY(side * 0.16);
-  cuff.translate(side * 0.031, -0.013, 0.135);
-  cloth.push(paint(cuff, 0xffffff));
-  const sleeve = new THREE.CylinderGeometry(0.040, 0.047, 0.13, 12);
-  sleeve.rotateX(Math.PI / 2);
-  sleeve.rotateY(side * 0.16);
-  sleeve.translate(side * 0.034, -0.014, 0.226);
-  cloth.push(paint(sleeve, 0xd8dcc8));
+  cuff.translate(0, 0, 0.03);
+  cuff.applyMatrix4(m);
+  out.push(paint(cuff, 0xffffff));
 
-  return { skin, cloth };
+  const sleeve = new THREE.CylinderGeometry(0.043, 0.044, 0.085, 14);
+  sleeve.rotateX(Math.PI / 2);
+  sleeve.translate(0, 0, 0.098);
+  sleeve.applyMatrix4(m);
+  out.push(paint(sleeve, 0xd8dcc8));
+  return out;
+}
+
+/**
+ * Матрица посадки кисти, заданная по смыслу, а не стопкой углов.
+ *
+ * grip — вдоль чего идёт обхват: линия, по которой в кулаке лежит
+ *        рукоять (она же — куда смотрит большой палец);
+ * wrist — куда от кисти уходит предплечье.
+ *
+ * Кулак устроен так, что запястье перпендикулярно обхвату, поэтому
+ * wrist только уточняется: его составляющая вдоль grip отбрасывается.
+ * Ладонь после этого определяется однозначно — рука-то правая.
+ */
+function gripBasis(grip, wrist, pos) {
+  const x = grip.clone().normalize();
+  const z = wrist.clone().addScaledVector(x, -wrist.dot(x)).normalize();
+  const y = new THREE.Vector3().crossVectors(z, x);
+  return new THREE.Matrix4().makeBasis(x, y, z).setPosition(pos);
+}
+
+/* Докуда у кисти тянется запястье: туда садится манжета. У модели
+   срез приходится на 0.10 м, у процедурной кисти культя чуть длиннее —
+   манжета шириной 5,5 см закрывает оба варианта. */
+const WRIST_Z = 0.070;
+
+/**
+ * Рука в сборе: кисть плюс уходящее от неё предплечье.
+ *
+ * Раньше кисть и рукав ставились независимыми матрицами. Стоило
+ * тронуть хват — предплечье уезжало не туда, а у скачанной модели
+ * оставался открыт срез запястья и читался как плоский лоскут.
+ * Теперь и то и другое висит на одном якоре: рукав растёт вдоль оси
+ * запястья и всегда затыкает срез.
+ *
+ * Система якоря — та же, в которой собрана процедурная кисть:
+ * пальцы в -Z, запястье в +Z, тыл ладони в +Y, ось обхвата — X.
+ * bend слегка опускает предплечье относительно кисти.
+ */
+function armAt(side, pose, m, bend = 0) {
+  const arm = new THREE.Group();
+  arm.matrixAutoUpdate = false;
+  arm.matrix.copy(m);
+
+  arm.add(handSlot(side, pose, new THREE.Matrix4()));
+
+  const cuffM = new THREE.Matrix4().makeRotationX(bend);
+  cuffM.premultiply(new THREE.Matrix4().makeTranslation(0, 0, WRIST_Z));
+  arm.add(assemble([[VM.cloth, sleeveAt(cuffM)]]));
+  return arm;
 }
 
 /** Пустая правая рука — ей и собирают грибы. */
 function buildBareHand() {
-  const h = buildHand(1, 'open');
-  return assemble([[VM.skin, h.skin], [VM.cloth, h.cloth]]);
+  // Ладонь раскрыта и тянется к грибу: пальцы вперёд-вниз, большой
+  // отведён вверх, предплечье уходит назад-вправо к плечу.
+  const m = gripBasis(
+    new THREE.Vector3(-0.20, 0.94, -0.28),      // большой палец
+    new THREE.Vector3(0.45, -0.55, 0.70),       // куда уходит предплечье
+    new THREE.Vector3(0, 0, 0.02)
+  );
+  const g = new THREE.Group();
+  g.add(armAt(1, 'open', m, -0.12));
+  return g;
 }
 
 /* ---------- грибной нож: изогнутое лезвие, щётка на торце ---------- */
-function buildKnife() {
+function knifeGeometry() {
   const steel = [], wood = [], brass = [];
 
   // рукоять — точёный профиль под пальцы
@@ -219,18 +248,55 @@ function buildKnife() {
   const br = new THREE.CylinderGeometry(0.017, 0.021, 0.026, 12);
   br.rotateX(Math.PI / 2);
   br.translate(0, 0, 0.132);
-  const bristles = paint(br, 0xd8b45c);
-  wood.push(bristles);
+  wood.push(paint(br, 0xd8b45c));
 
-  // правая кисть обхватывает рукоять
-  const hand = buildHand(1);
-  const hs = hand.skin.map((geo) => { geo.translate(0, 0, 0.052); return geo; });
-  const hc = hand.cloth.map((geo) => { geo.translate(0, 0, 0.052); return geo; });
+  return assemble([[VM.steel, steel], [VM.wood, wood], [VM.brass, brass]]);
+}
 
-  return assemble([
-    [VM.steel, steel], [VM.wood, wood], [VM.brass, brass],
-    [VM.skin, hs], [VM.cloth, hc],
-  ]);
+/**
+ * Наполняет узел ножа: скачанная модель, если она есть, иначе своя.
+ * Материалы модели заменяются на оружейные по именам мешей — в FBX
+ * их всё равно нет, а рисованные текстуры со сталью и деревом лучше
+ * любой заглушки.
+ */
+const KNIFE_TINT = { steel: 0xd6dae0, wood: 0x8a6234, brass: 0xc8a54a };
+
+function fillKnife(node) {
+  node.clear();
+  const model = instance('knife');
+  if (model) {
+    const parts = ASSETS.knife.parts || {};
+    model.traverse((o) => {
+      if (!o.isMesh) return;
+      const kind = parts[(o.name || '').toLowerCase()] || 'steel';
+      // оружейные материалы красятся вершинным цветом; у чужой модели
+      // его нет, и без этого она выходит чёрной
+      paint(o.geometry, KNIFE_TINT[kind]);
+      o.material = VM[kind];
+    });
+    node.add(model);
+    return;
+  }
+  node.add(knifeGeometry());
+}
+
+function buildKnife() {
+  const g = new THREE.Group();
+
+  const blade = new THREE.Group();
+  fillKnife(blade);
+  onAsset('knife', () => fillKnife(blade));
+  g.add(blade);
+
+  // «Тычковый» хват: рукоять лежит в кулаке вдоль Z, большой палец
+  // вытянут по ней к клинку, предплечье уходит вниз-вправо за кадр.
+  const m = gripBasis(
+    new THREE.Vector3(0, 0, -1),                // обхват вдоль рукояти, к клинку
+    new THREE.Vector3(0.62, -0.62, 0.30),       // предплечье
+    new THREE.Vector3(0.002, -0.004, 0.062)
+  );
+  g.add(armAt(1, 'fist', m, -0.10));
+  return g;
 }
 
 /* ---------- ТТ: рамка, затвор с насечкой, накладки ---------- */
@@ -293,27 +359,19 @@ function buildPistol() {
   // целик
   steel.push(box(0.014, 0.006, 0.008, 0, 0.060, 0.026, 0xb8bcc4));
 
-  // Правая кисть на рукояти, левая поддерживает снизу — двуручный хват
-  // читается как настоящий, а не как парящий в воздухе пистолет.
-  const right = buildHand(1);
-  const rs = right.skin.map((geo) => {
-    geo.rotateX(-0.28); geo.translate(-0.012, -0.055, 0.028); return geo;
-  });
-  const rc = right.cloth.map((geo) => {
-    geo.rotateX(-0.28); geo.translate(-0.012, -0.055, 0.028); return geo;
-  });
-  const left = buildHand(-1);
-  const ls = left.skin.map((geo) => {
-    geo.rotateX(-0.5); geo.rotateZ(0.35); geo.translate(0.006, -0.085, 0.052); return geo;
-  });
-  const lc = left.cloth.map((geo) => {
-    geo.rotateX(-0.5); geo.rotateZ(0.35); geo.translate(0.006, -0.085, 0.052); return geo;
-  });
+  // Рукоять ТТ наклонена назад — вдоль неё и идёт обхват правого
+  // кулака, большой палец смотрит вверх к затвору. Левая кисть
+  // подхватывает правую сбоку, её предплечье уходит влево-назад.
+  const gripAxis = new THREE.Vector3(0, 0.965, -0.262);
+  const mR = gripBasis(gripAxis, new THREE.Vector3(0.42, -0.60, 0.68),
+    new THREE.Vector3(-0.002, -0.050, 0.026));
+  const mL = gripBasis(gripAxis.clone().applyAxisAngle(new THREE.Vector3(0, 0, 1), 0.30),
+    new THREE.Vector3(-0.50, -0.62, 0.60), new THREE.Vector3(0.030, -0.074, 0.050));
 
   const body = assemble([
     [VM.steel, steel], [VM.wood, wood], [VM.brass, brass],
-    [VM.skin, [...rs, ...ls]], [VM.cloth, [...rc, ...lc]],
   ]);
+  body.add(armAt(1, 'fist', mR, -0.16), armAt(-1, 'fist', mL, -0.16));
 
   // затвор — отдельной деталью, ездит при выстреле
   const sl = [];
@@ -402,13 +460,14 @@ export class Weapons {
     this.pistol.visible = false;
 
     this.basePos = {
-      hands: new THREE.Vector3(0.26, -0.24, -0.42),
-      knife: new THREE.Vector3(0.22, -0.20, -0.42),
-      pistol: new THREE.Vector3(0.135, -0.085, -0.40),
+      hands: new THREE.Vector3(0.235, -0.215, -0.38),
+      knife: new THREE.Vector3(0.185, -0.145, -0.385),
+      pistol: new THREE.Vector3(0.115, -0.125, -0.47),
     };
     this.baseRot = {
-      hands: new THREE.Euler(-0.22, -0.30, 0.1),
-      knife: new THREE.Euler(-0.12, -1.5, 0.38),
+      hands: new THREE.Euler(-0.05, -0.52, 0.05),
+      // «тычковый» хват: клинок смотрит вперёд-влево, как в CS
+      knife: new THREE.Euler(-0.26, 0.38, 0.30),
       pistol: new THREE.Euler(0.02, 0.20, -0.05),
     };
     this._place();

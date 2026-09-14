@@ -1,7 +1,9 @@
 import * as THREE from 'three';
 import { mergeParts } from './geo.js';
-import { CONTAINERS } from './config.js';
+import { CONTAINERS, ASSETS } from './config.js';
 import { skinTex, clothTex, metalTex, woodTex } from './textures.js';
+import { buildHandGeometry } from './handmesh.js';
+import { onAsset, instance, poseHandBones } from './assets.js';
 import { dampTo, clamp } from './utils.js';
 
 /* ============================================================
@@ -11,10 +13,13 @@ import { dampTo, clamp } from './utils.js';
 
 const MAT = {
   skin: new THREE.MeshStandardMaterial({
-    vertexColors: true, map: skinTex(), roughness: 0.78, metalness: 0,
+    map: skinTex(), roughness: 0.74, metalness: 0,
   }),
   cloth: new THREE.MeshStandardMaterial({
     vertexColors: true, map: clothTex(), roughness: 0.95, metalness: 0,
+  }),
+  nail: new THREE.MeshStandardMaterial({
+    color: 0xdcb49e, roughness: 0.28, metalness: 0,
   }),
   rubber: new THREE.MeshStandardMaterial({
     vertexColors: true, roughness: 0.55, metalness: 0.05,
@@ -69,55 +74,83 @@ function buildLeg(side, boots) {
   const HIP = -0.72, KNEE = -1.16, FOOT = -1.60;
   const x = side * 0.115;
 
-  const thigh = new THREE.CylinderGeometry(0.088, 0.076, KNEE - HIP, 10);
-  thigh.rotateX(0.14);
-  thigh.translate(x, (HIP + KNEE) / 2, -0.07);
+  const thigh = new THREE.CylinderGeometry(0.086, 0.074, KNEE - HIP, 10);
+  thigh.rotateX(0.18);
+  thigh.translate(x, (HIP + KNEE) / 2, -0.015);
   cloth.push(paint(thigh, 0xb8bca8));
 
-  const shin = new THREE.CylinderGeometry(0.074, 0.062, FOOT - KNEE, 10);
-  shin.rotateX(-0.06);
-  shin.translate(x, (KNEE + FOOT) / 2, -0.12);
+  const shin = new THREE.CylinderGeometry(0.072, 0.060, FOOT - KNEE, 10);
+  shin.rotateX(-0.10);
+  shin.translate(x, (KNEE + FOOT) / 2, -0.10);
   cloth.push(paint(shin, 0xa8ac98));
 
   if (boots) {
     // резиновый сапог: высокое голенище, раструб и рифлёная подошва
     const shaft = new THREE.CylinderGeometry(0.092, 0.084, 0.36, 12);
     shaft.rotateX(-0.06);
-    shaft.translate(x, FOOT + 0.2, -0.135);
+    shaft.translate(x, FOOT + 0.2, -0.115);
     shoe.push(paint(shaft, 0x2a3a40));
     const cuff = new THREE.CylinderGeometry(0.1, 0.092, 0.055, 12);
     cuff.rotateX(-0.06);
-    cuff.translate(x, FOOT + 0.38, -0.145);
+    cuff.translate(x, FOOT + 0.38, -0.125);
     shoe.push(paint(cuff, 0x3c5058));
-    const foot = new THREE.BoxGeometry(0.12, 0.095, 0.28, 2, 1, 3);
-    foot.translate(x, FOOT + 0.02, -0.19);
-    shoe.push(paint(foot, 0x222e34));
-    const toe = new THREE.SphereGeometry(0.061, 10, 7);
-    toe.scale(1, 0.72, 1.1);
-    toe.translate(x, FOOT + 0.015, -0.31);
-    shoe.push(paint(toe, 0x222e34));
-    const sole = new THREE.BoxGeometry(0.13, 0.035, 0.31, 2, 1, 4);
-    sole.translate(x, FOOT - 0.038, -0.2);
-    shoe.push(paint(sole, 0x14181c));
+
   } else {
     // обычный кирзовый ботинок
     const boot = new THREE.CylinderGeometry(0.086, 0.08, 0.17, 10);
     boot.rotateX(-0.06);
-    boot.translate(x, FOOT + 0.1, -0.125);
+    boot.translate(x, FOOT + 0.1, -0.105);
     shoe.push(paint(boot, 0x4a3a2a));
-    const foot = new THREE.BoxGeometry(0.11, 0.09, 0.26, 2, 1, 3);
-    foot.translate(x, FOOT + 0.02, -0.18);
-    shoe.push(paint(foot, 0x40311f));
-    const toe = new THREE.SphereGeometry(0.056, 10, 7);
-    toe.scale(1, 0.76, 1.05);
-    toe.translate(x, FOOT + 0.015, -0.29);
-    shoe.push(paint(toe, 0x40311f));
-    const sole = new THREE.BoxGeometry(0.118, 0.03, 0.28, 2, 1, 3);
-    sole.translate(x, FOOT - 0.033, -0.19);
-    shoe.push(paint(sole, 0x1c1610));
+
   }
 
-  return group([[MAT.cloth, cloth], [boots ? MAT.rubber : MAT.leather, shoe]]);
+  const g = group([[MAT.cloth, cloth], [boots ? MAT.rubber : MAT.leather, shoe]]);
+
+  // Сама ступня — отдельным узлом: её подменяет скачанная модель, когда
+  // догрузится. Модель одна на обе ноги, левая получается зеркалом.
+  const node = new THREE.Group();
+  node.position.set(x, FOOT - (boots ? 0.055 : 0.048), -0.225);
+  node.scale.x = side;
+  fillFoot(node, boots);
+  onAsset('feet', () => fillFoot(node, boots));
+  g.add(node);
+
+  return g;
+}
+
+/** Наполняет узел ступни: внешняя модель или коробка с носком. */
+function fillFoot(node, boots) {
+  node.clear();
+  const mat = boots ? MAT.rubber : MAT.leather;
+  // Под кроной леса тёмная обувь сливается в кляксу — берём на пару
+  // тонов светлее, чем красили коробку.
+  const col = boots ? 0x35474f : 0x5c4630;
+
+  const model = instance('feet');
+  if (model) {
+    model.traverse((o) => {
+      if (!o.isMesh) return;
+      // материалы обуви красятся вершинным цветом — у модели его нет
+      paint(o.geometry, col);
+      o.material = mat;
+    });
+    node.add(model);
+    return;
+  }
+
+  const parts = [];
+  const h = boots ? 0.095 : 0.09;
+  const foot = new THREE.BoxGeometry(boots ? 0.12 : 0.11, h, boots ? 0.28 : 0.26, 2, 1, 3);
+  foot.translate(0, h / 2 + 0.02, 0.01);
+  parts.push(paint(foot, col));
+  const toe = new THREE.SphereGeometry(boots ? 0.061 : 0.056, 10, 7);
+  toe.scale(1, boots ? 0.72 : 0.76, boots ? 1.1 : 1.05);
+  toe.translate(0, h / 2 + 0.015, -0.11);
+  parts.push(paint(toe, col));
+  const sole = new THREE.BoxGeometry(boots ? 0.13 : 0.118, 0.032, boots ? 0.31 : 0.28, 2, 1, 3);
+  sole.translate(0, 0.016, 0.005);
+  parts.push(paint(sole, boots ? 0x14181c : 0x1c1610));
+  node.add(new THREE.Mesh(mergeParts(parts), mat));
 }
 
 /* ------------------------------------------------------------
@@ -125,6 +158,7 @@ function buildLeg(side, boots) {
    ------------------------------------------------------------ */
 function buildContainer(model) {
   const plastic = [], metal = [], wicker = [];
+  let gripY = 0;   // где у этой тары ручка — за неё и держит кулак
 
   if (model === 'bagS' || model === 'bagL') {
     const big = model === 'bagL';
@@ -149,6 +183,7 @@ function buildContainer(model) {
       hd.translate(sx * w * 0.26, -0.022, 0);
       plastic.push(paint(hd, big ? 0xc4d4e2 : 0xdfe8f0));
     }
+    gripY = -0.022 + w * 0.24;
   } else if (model === 'basket') {
     const r = 0.15;
     const body = new THREE.CylinderGeometry(r, r * 0.72, 0.19, 16, 3, true);
@@ -165,6 +200,7 @@ function buildContainer(model) {
     handle.rotateY(Math.PI / 2);
     handle.translate(0, -0.03, 0);
     wicker.push(paint(handle, 0x8a6a34));
+    gripY = -0.03 + r * 0.94;
   } else {
     // вёдра: чем больше литраж, тем крупнее
     const size = { pail3: 0.105, pail5: 0.125, pail10: 0.155 }[model] || 0.12;
@@ -185,40 +221,71 @@ function buildContainer(model) {
     bail.rotateY(Math.PI / 2);
     bail.translate(0, -0.03, 0);
     metal.push(paint(bail, 0x9aa0a8));
+    gripY = -0.03 + size * 0.95;
   }
 
-  return group([[MAT.plastic, plastic], [MAT.metal, metal], [MAT.wicker, wicker]]);
+  const g = group([[MAT.plastic, plastic], [MAT.metal, metal], [MAT.wicker, wicker]]);
+  g.userData.gripY = gripY;
+  return g;
 }
 
 /* ------------------------------------------------------------
-   Кисть левой руки, держащая тару за ручку
+   Кисть левой руки, держащая тару за ручку.
+   Модель общая с оружием — из handmesh.js.
    ------------------------------------------------------------ */
+const HAND_GRIP = 0.03;
+
 function buildLeftHand() {
-  const skin = [], cloth = [];
-  const palm = new THREE.BoxGeometry(0.05, 0.048, 0.062, 2, 2, 2);
-  palm.translate(0, 0.028, 0);
-  skin.push(paint(palm, 0xffffff));
-  for (let i = 0; i < 4; i++) {
-    const f = new THREE.CylinderGeometry(0.0095, 0.0102, 0.046, 8);
-    f.rotateX(Math.PI / 2);
-    f.translate(-0.016 + i * 0.011, 0.018, -0.004);
-    skin.push(paint(f, 0xffffff));
+  const g = new THREE.Group();
+
+  // Кулак обхватывает то, что лежит вдоль его оси X, а ручка тары
+  // как раз горизонтальная — доворачивать не нужно, только приподнять
+  // кисть на высоту хвата.
+  const m = new THREE.Matrix4().makeRotationX(0.35);
+  m.premultiply(new THREE.Matrix4().makeTranslation(0, HAND_GRIP, 0.008));
+
+  const node = new THREE.Group();
+  node.matrixAutoUpdate = false;
+  node.matrix.copy(m);
+  fillLeftHand(node);
+  onAsset('hands', () => fillLeftHand(node));
+  g.add(node);
+
+  // Предплечье уходит от кисти НАЗАД и чуть вниз — к локтю у бока.
+  // Раньше оно торчало вверх и читалось как гриб на палке.
+  const cloth = [];
+  const A = 1.95;
+  const dy = Math.cos(A), dz = Math.sin(A);
+  // манжета садится на срез запястья: у модели он на 0,10 м от кисти,
+  // и открытым его оставлять нельзя — он читается как плоский лоскут
+  const cuff = new THREE.CylinderGeometry(0.040, 0.045, 0.055, 14);
+  cuff.rotateX(A);
+  cuff.translate(0.004, HAND_GRIP + dy * 0.10, dz * 0.10);
+  cloth.push(paint(cuff, 0xffffff));
+  const sleeve = new THREE.CylinderGeometry(0.044, 0.046, 0.10, 14);
+  sleeve.rotateX(A);
+  sleeve.translate(0.008, HAND_GRIP + dy * 0.163, dz * 0.163);
+  cloth.push(paint(sleeve, 0xd8dcc8));
+  g.add(new THREE.Mesh(mergeParts(cloth), MAT.cloth));
+
+  return g;
+}
+
+/** Наполняет узел левой кисти: внешняя модель или процедурная. */
+function fillLeftHand(node) {
+  node.clear();
+  const model = instance('hands');
+  if (model) {
+    const cfg = ASSETS.hands;
+    // модель даёт одну конкретную руку; если пришла правая — зеркалим
+    if ((cfg.side || 1) !== -1) model.scale.x *= -1;
+    poseHandBones(model, cfg.fistCurl, cfg.bendAxis, cfg.bendSign);
+    node.add(model);
+    return;
   }
-  const th = new THREE.CylinderGeometry(0.0108, 0.0114, 0.042, 8);
-  th.rotateZ(Math.PI / 2.4);
-  th.translate(0.024, 0.042, -0.006);
-  skin.push(paint(th, 0xe8d0c0));
-  // Дальше кисти руку не показываем: в кадре от первого лица
-  // длинное предплечье загораживает пол-экрана.
-  const wrist = new THREE.CylinderGeometry(0.026, 0.029, 0.06, 10);
-  wrist.rotateX(0.55);
-  wrist.translate(0.004, 0.072, 0.036);
-  skin.push(paint(wrist, 0xffffff));
-  const cuff = new THREE.CylinderGeometry(0.034, 0.038, 0.05, 12);
-  cuff.rotateX(0.55);
-  cuff.translate(0.008, 0.115, 0.062);
-  cloth.push(paint(cuff, 0xd8dcc8));
-  return group([[MAT.skin, skin], [MAT.cloth, cloth]]);
+  const src = buildHandGeometry(-1, 'fist');
+  node.add(new THREE.Mesh(src.skin, MAT.skin));
+  node.add(new THREE.Mesh(src.nails, MAT.nail));
 }
 
 /* ============================================================ */
@@ -234,8 +301,10 @@ export class Body {
     this.boots = false;
 
     this.armWrap = new THREE.Group();
-    this.armWrap.position.set(-0.3, -0.4, -0.5);
-    this.armWrap.rotation.set(0.12, 0.3, -0.12);
+    // Локоть у левого бока, поэтому предплечье должно уходить назад-влево.
+    // При положительном довороте оно шло поперёк кадра и читалось бревном.
+    this.armWrap.position.set(-0.30, -0.20, -0.70);
+    this.armWrap.rotation.set(0.04, -0.26, -0.08);
     this.root.add(this.armWrap);
 
     this.hand = buildLeftHand();
@@ -282,8 +351,11 @@ export class Body {
     const def = CONTAINERS[tier];
     if (!def) return;
     const c = buildContainer(def.model);
+    // ручка тары должна оказаться ровно в кулаке
+    c.position.y = HAND_GRIP - (c.userData.gripY || 0);
     this.containerNode.add(c);
     this.current = c;
+    this.containerBase = c.position.y;
   }
 
   /** Показывает, сколько набрано: грибы горкой в таре. */
@@ -302,7 +374,7 @@ export class Body {
     const r = isBag ? 0.07 : def && def.model === 'basket' ? 0.13 : 0.1;
     this.fillMesh.visible = ratio > 0.02 && !isBag;
     this.fillMesh.scale.setScalar((r / 0.1) * (0.6 + ratio * 0.4));
-    this.fillMesh.position.y = -0.035 - (1 - ratio) * 0.06;
+    this.fillMesh.position.y = (this.containerBase || 0) - 0.035 - (1 - ratio) * 0.06;
   }
 
   update(dt, player, inv, weapons) {
@@ -330,11 +402,11 @@ export class Body {
     this.bob = dampTo(this.bob, sp, 6, dt);
     const t = performance.now() / 1000;
     this.armWrap.position.set(
-      -0.3 + Math.sin(t * 6.2) * 0.014 * this.bob,
-      -0.4 - Math.abs(Math.cos(t * 6.2)) * 0.02 * this.bob - (player.dodging ? 0.08 : 0),
-      -0.5
+      -0.30 + Math.sin(t * 6.2) * 0.016 * this.bob,
+      -0.20 - Math.abs(Math.cos(t * 6.2)) * 0.024 * this.bob - (player.dodging ? 0.09 : 0),
+      -0.70
     );
-    this.armWrap.rotation.z = -0.12 + Math.sin(t * 6.2) * 0.06 * this.bob;
+    this.armWrap.rotation.z = -0.1 + Math.sin(t * 6.2) * 0.06 * this.bob;
 
     if (inv) {
       this.setContainer(inv.tier);
