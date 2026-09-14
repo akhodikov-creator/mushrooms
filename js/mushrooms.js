@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { mergeParts } from './geo.js';
 import { CONFIG } from './config.js';
 import { rng, terrainHeight, moisture, isWater, clamp, TAU } from './utils.js';
+import { capTex } from './textures.js';
 
 /* ============================================================
    Виды грибов средней полосы России.
@@ -295,10 +296,24 @@ export function getMushroomGeometry(sp, variant) {
   return g;
 }
 
-export const MAT_MUSHROOM = new THREE.MeshLambertMaterial({ vertexColors: true });
-export const MAT_MUSHROOM_HL = new THREE.MeshLambertMaterial({
-  vertexColors: true, emissive: 0x556622, emissiveIntensity: 1.0,
+export const MAT_MUSHROOM = new THREE.MeshStandardMaterial({
+  vertexColors: true, map: capTex(), roughness: 0.82, metalness: 0,
 });
+/** Гриб рядом: лёгкое свечение, иначе шляпку не видно в траве. */
+export const MAT_MUSHROOM_NEAR = new THREE.MeshStandardMaterial({
+  vertexColors: true, map: capTex(), roughness: 0.78, metalness: 0,
+  emissive: 0x2a3410, emissiveIntensity: 1.0,
+});
+export const MAT_MUSHROOM_HL = new THREE.MeshStandardMaterial({
+  vertexColors: true, map: capTex(), roughness: 0.7, metalness: 0,
+  emissive: 0x66832a, emissiveIntensity: 1.0,
+});
+
+export function applyMushroomEnv(env) {
+  for (const m of [MAT_MUSHROOM, MAT_MUSHROOM_NEAR, MAT_MUSHROOM_HL]) {
+    m.envMap = env; m.envMapIntensity = 0.5; m.needsUpdate = true;
+  }
+}
 
 /* ------------------------------------------------------------
    Взвешенный выбор вида под условия точки

@@ -2,14 +2,14 @@ import * as THREE from 'three';
 import { CONFIG, CONTAINERS } from './config.js';
 import { Audio } from './audio.js';
 import { UI } from './ui.js';
-import { World, CAMPS } from './world.js';
+import { World, CAMPS, applyEnvMap } from './world.js';
 import { Player } from './player.js';
-import { AnimalManager, KINDS } from './animals.js';
-import { Weapons } from './weapons.js';
-import { Pickups } from './pickups.js';
+import { AnimalManager, KINDS, applyAnimalEnv } from './animals.js';
+import { Weapons, applyWeaponEnv } from './weapons.js';
+import { Pickups, applyPickupEnv } from './pickups.js';
 import { Inventory } from './inventory.js';
 import { Leaderboard } from './leaderboard.js';
-import { MAT_MUSHROOM, MAT_MUSHROOM_HL } from './mushrooms.js';
+import { MAT_MUSHROOM_HL, SPECIES_BY_ID, applyMushroomEnv } from './mushrooms.js';
 import { clamp, lerp, dampTo, fmtNum, terrainHeight, wrapDelta, isWater } from './utils.js';
 
 export class Game {
@@ -23,6 +23,10 @@ export class Game {
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.16;
+    if (CONFIG.quality !== 'low') {
+      this.renderer.shadowMap.enabled = true;
+      this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    }
 
     this.scene = new THREE.Scene();
     this.scene.fog = new THREE.Fog(0xa8b8a0, CONFIG.fogNear, CONFIG.fogFar);
@@ -31,6 +35,11 @@ export class Game {
     this.scene.add(this.camera);
 
     this.world = new World(this.scene);
+    const env = applyEnvMap(this.renderer, this.scene);
+    applyWeaponEnv(env);
+    applyAnimalEnv(env);
+    applyPickupEnv(env);
+    applyMushroomEnv(env);
     this.player = new Player(this.camera, this.canvas);
     this.animals = new AnimalManager(this.scene);
     this.weapons = new Weapons(this.camera, this.animals, this.scene);
@@ -50,6 +59,7 @@ export class Game {
 
     // расписание режиссёра
     this.sched = {};
+    this.effects = [];          // активные бонусы от находок
 
     this._wireAnimals();
     this._wireInput();
@@ -102,6 +112,12 @@ export class Game {
       if (!locked && this.state === 'playing') this.pause();
     };
     this.player.onDeath = (src) => this._die(src);
+    this.player.onDodgeResult = (res) => {
+      if (res === true) return;
+      // молчаливый отказ читается как «пробел не работает» — объясняем
+      Audio.dryFire();
+      UI.toast(`Рывок не вышел: <b>${res}</b>`, 'warn');
+    };
   }
 
   _primary() {
@@ -195,27 +211,114 @@ export class Game {
   }
 
   _takePickup(p) {
-    if (p.type === 'pistol') {
-      const first = this.weapons.givePistol(16);
-      this.weapons.select('pistol');
-      Audio.found();
-      UI.banner('ТТ, 16 ПАТРОНОВ', first ? 'ЛКМ — выстрел, R — перезарядка. Больше патронов — в лесу' : '', 3600, 'good');
-    } else if (p.type === 'ammo') {
-      if (!this.weapons.has.pistol) { this.weapons.givePistol(8); Audio.found(); }
-      else { this.weapons.addAmmo(8); Audio.reload(); }
-      UI.toast('Патроны 7,62×25 <b>+8</b>', 'good');
-    } else if (p.type === 'thermos') {
-      this.player.hp = Math.min(CONFIG.maxHp, this.player.hp + 45);
-      this.player.lastDamage = 0;
-      Audio.found();
-      UI.toast('Чай из термоса <b>+45 ХП</b>', 'good');
-    } else if (p.type === 'boots') {
-      this.player.speedScale = 1.28;
-      this.bootsT = 55;
-      Audio.found();
-      UI.toast('Резиновые сапоги: <b>+28% скорости</b> на 55 c', 'good');
+    const P = this.player;
+    switch (p.type) {
+      case 'pistol': {
+        const first = this.weapons.givePistol(16);
+        this.weapons.select('pistol');
+        Audio.found();
+        UI.banner('ТТ, 16 ПАТРОНОВ',
+          first ? 'ЛКМ — выстрел, R — перезарядка. Патроны ищи по лесу' : '', 3600, 'good');
+        break;
+      }
+      case 'ammo':
+        if (!this.weapons.has.pistol) { this.weapons.givePistol(8); Audio.found(); }
+        else { this.weapons.addAmmo(8); Audio.reload(); }
+        UI.toast('Патроны 7,62×25 <b>+8</b>', 'good');
+        break;
+
+      case 'thermos':
+        P.hp = Math.min(CONFIG.maxHp, P.hp + 45);
+        P.lastDamage = 0;
+        Audio.found();
+        UI.toast('Чай из термоса <b>+45 ХП</b>', 'good');
+        break;
+
+      case 'berries':
+        P.hp = Math.min(CONFIG.maxHp, P.hp + 22);
+        Audio.pickup(3);
+        UI.toast('Брусника <b>+22 ХП</b>', 'good');
+        break;
+
+      case 'boots':
+        this._addEffect('boots', 'Сапоги', '🥾', 60,
+          () => { P.speedScale = 1.3; },
+          () => { P.speedScale = 1; });
+        Audio.found();
+        UI.toast('Резиновые сапоги: <b>+30% скорости</b> на минуту', 'good');
+        break;
+
+      case 'flask':
+        P.stamina = CONFIG.maxStamina + P.levelStamina;
+        this._addEffect('flask', 'Настойка', '🍶', 45,
+          () => { P.staminaFree = true; },
+          () => { P.staminaFree = false; });
+        Audio.found();
+        UI.toast('Настойка на травах: <b>бег не тратит силы</b> 45 c', 'good');
+        break;
+
+      case 'raincoat':
+        this._addEffect('raincoat', 'Дождевик', '🧥', 70,
+          () => { this.animals.aggroScale = 0.6; },
+          () => { this.animals.aggroScale = 1; });
+        Audio.found();
+        UI.toast('Плащ-дождевик: <b>звери сближаются медленнее</b>', 'good');
+        break;
+
+      case 'compass':
+        this._addEffect('compass', 'Компас', '🧭', 90,
+          () => { this.radarRange = 300; },
+          () => { this.radarRange = 130; });
+        Audio.found();
+        UI.toast('Дедов компас: <b>радар видит дальше</b> 90 c', 'good');
+        break;
+
+      case 'basket': {
+        // чужое лукошко: сразу несколько грибов в тару
+        const pool = ['bely', 'podosinovik', 'podberezovik', 'lisichka', 'maslenok', 'ryzhik'];
+        let n = 0, gained = 0;
+        for (let i = 0; i < 6 && !this.inv.full; i++) {
+          const sp = SPECIES_BY_ID[pool[(Math.random() * pool.length) | 0]];
+          gained += this.inv.add(sp).gained;
+          n++;
+        }
+        this.bestMult = Math.max(this.bestMult, this.inv.totalMult);
+        Audio.upgrade();
+        UI.toast(n ? `Чужое лукошко: <b>${n} грибов</b> +${fmtNum(gained)}`
+          : 'Лукошко есть, а тара полна', n ? 'rare' : 'warn');
+        break;
+      }
     }
     this.pickups.take(p);
+  }
+
+  /* ============================================================
+     Бонусы от находок
+     ============================================================ */
+
+  /** Вешает временный бонус. Повторная находка продлевает, а не дублирует. */
+  _addEffect(id, name, icon, dur, apply, clear) {
+    const found = this.effects.find((e) => e.id === id);
+    if (found) { found.t = Math.max(found.t, dur); return; }
+    this.effects.push({ id, name, icon, t: dur, dur, clear });
+    apply();
+  }
+
+  _updateEffects(dt) {
+    for (let i = this.effects.length - 1; i >= 0; i--) {
+      const e = this.effects[i];
+      e.t -= dt;
+      if (e.t <= 0) {
+        e.clear();
+        this.effects.splice(i, 1);
+        UI.toast(`${e.icon} ${e.name} — закончилось`, 'info');
+      }
+    }
+  }
+
+  _clearEffects() {
+    for (const e of this.effects) e.clear();
+    this.effects.length = 0;
   }
 
   /* ============================================================
@@ -262,12 +365,17 @@ export class Game {
         return;
       }
 
-      const bonus = Math.round(CONFIG.oleBonus * weight);
+      // Убывающая награда: гонять одного зверя по кругу ради очков
+      // не должно быть выгоднее, чем собирать грибы.
+      a.oleCount = (a.oleCount || 0) + 1;
+      const bonus = Math.round(CONFIG.oleBonus * weight / (1 + (a.oleCount - 1) * 0.85));
       this.inv.addBonus(bonus);
       this.inv.oles++;
       this.inv.combo = Math.min(CONFIG.comboMax, this.inv.combo + 0.6);
       this.inv.comboT = CONFIG.comboWindow;
       Audio.ole();
+      // опыт за уворот — только за первый от каждого зверя
+      if (a.oleCount === 1) this._gainXp(CONFIG.xpOle);
       this.slowmoT = Math.max(this.slowmoT, 0.4);
       UI.banner('¡OLÉ!', `${a.k.name} мимо · +${fmtNum(bonus)} · множитель растёт`, 1500, 'ole');
     };
@@ -275,6 +383,10 @@ export class Game {
     A.onKill = (a) => {
       this.inv.addBonus(a.k.bonus);
       this.inv.kills++;
+      this._gainXp({
+        bear: CONFIG.xpBear, boar: CONFIG.xpBoar,
+        wolf: CONFIG.xpWolf, harius: CONFIG.xpHarius,
+      }[a.kindId] || 20);
       const extra = a.kindId === 'harius'
         ? 'Ты застрелил рыбу. В лесу. Молодец.'
         : a.kindId === 'bear' ? 'Ты завалил медведя. Легенда.' : '';
@@ -285,6 +397,17 @@ export class Game {
     A.onLeave = (a) => {
       if (!a.dead) UI.toast(`${a.k.name} потерял интерес и ушёл`, 'info');
     };
+  }
+
+  /** Опыт и повышение уровня охотника. Уровень живёт только внутри забега. */
+  _gainXp(amount) {
+    const up = this.inv.addXp(amount);
+    if (!up) return;
+    const lvl = this.inv.level;
+    Audio.upgrade();
+    UI.banner(`УРОВЕНЬ ${lvl}`,
+      `Скорость +${Math.round((this.inv.speedBonus - 1) * 100)}% · ` +
+      `выносливость +${this.inv.staminaBonus} · дальше дотягиваешься`, 2600, 'good');
   }
 
   _onWeaponHit(r) {
@@ -319,17 +442,22 @@ export class Game {
 
     // --- патроны ---
     if (S.pistol && t >= (S.nextAmmo || 1e9)) {
-      S.nextAmmo = t + 52 + Math.random() * 38;
-      if (this.pickups.list.filter((q) => q.type === 'ammo').length < 3) {
-        this.pickups.spawnRandom('ammo', p.x, p.z, 45, 190);
-        UI.toast('Кто-то обронил патроны — видно на радаре', 'info');
+      S.nextAmmo = t + 38 + Math.random() * 26;
+      if (this.pickups.list.filter((q) => q.type === 'ammo').length < 4) {
+        const box = this.pickups.spawnRandom('ammo', p.x, p.z, 30, 110);
+        UI.toast(`Патроны: <b>${this._bearing(box)}</b> — ищи оранжевый луч`, 'warn');
       }
     }
 
-    // --- термос / сапоги ---
-    if (t > 70 && t >= (S.nextAid || 70)) {
-      S.nextAid = t + 95 + Math.random() * 60;
-      this.pickups.spawnRandom(Math.random() < 0.68 ? 'thermos' : 'boots', p.x, p.z, 40, 170);
+    // --- полезные находки ---
+    if (t > 45 && t >= (S.nextAid || 45)) {
+      S.nextAid = t + 52 + Math.random() * 38;
+      const pool = ['thermos', 'berries', 'boots', 'flask', 'raincoat', 'compass', 'basket'];
+      const weights = [22, 20, 14, 12, 10, 10, 12];
+      let acc = weights.reduce((a, b) => a + b, 0) * Math.random();
+      let pick = pool[0];
+      for (let i = 0; i < pool.length; i++) { acc -= weights[i]; if (acc <= 0) { pick = pool[i]; break; } }
+      if (this.pickups.list.length < 9) this.pickups.spawnRandom(pick, p.x, p.z, 28, 130);
     }
 
     // --- хариус ---
@@ -376,6 +504,18 @@ export class Game {
     }
   }
 
+  /** Словами: «северо-восток, 120 м» — чтобы находку реально нашли. */
+  _bearing(obj) {
+    const dx = wrapDelta(obj.x - this.player.x);
+    const dz = wrapDelta(obj.z - this.player.z);
+    const dist = Math.round(Math.hypot(dx, dz));
+    // на карте -Z считаем севером
+    const ang = (Math.atan2(dx, -dz) * 180 / Math.PI + 360) % 360;
+    const names = ['север', 'северо-восток', 'восток', 'юго-восток',
+      'юг', 'юго-запад', 'запад', 'северо-запад'];
+    return `${names[Math.round(ang / 45) % 8]}, ${dist} м`;
+  }
+
   /* ============================================================
      Жизненный цикл забега
      ============================================================ */
@@ -392,6 +532,8 @@ export class Game {
     this.bestMult = 1;
     this.bootsT = 0;
     this.sched = {};
+    this._clearEffects();
+    this.radarRange = 130;
     this.slowmoT = 0;
     this.shake = 0;
     this.state = 'playing';
@@ -523,6 +665,9 @@ export class Game {
     this._director(dt);
 
     const p = this.player;
+    p.levelSpeed = this.inv.speedBonus;
+    p.levelStamina = this.inv.staminaBonus;
+    this._updateEffects(dt);
     p.update(dt, this.world);
     this.inv.update(dt);
     this.weapons.update(dt, p);
@@ -533,9 +678,9 @@ export class Game {
     this.world.updateMushrooms(p.x, p.z, dt);
 
     // --- прицеливание по грибам ---
-    const prev = this.aimed;
-    this.aimed = this.world.findTarget(this.camera, p.x, p.z, CONFIG.pickRange);
-    if (prev && prev !== this.aimed) prev.mesh.material = MAT_MUSHROOM;
+    // базовый материал каждому грибу назначает updateMushrooms выше,
+    // поэтому прошлую цель отдельно сбрасывать не нужно
+    this.aimed = this.world.findTarget(this.camera, p.x, p.z, CONFIG.pickRange + this.inv.pickRangeBonus);
     if (this.aimed) this.aimed.mesh.material = MAT_MUSHROOM_HL;
 
     // --- подсказки ---
@@ -586,7 +731,14 @@ export class Game {
         ? `${charging.k.name} ГОТОВИТСЯ  ·  ПРОБЕЛ — В СТОРОНУ`
         : `${charging.k.name} ИДЁТ НА ТАРАН`;
     }
-    UI.danger(threat, dangerText);
+    // угол на зверя относительно взгляда — для стрелки на экране
+    let threatAngle = null;
+    if (charging) {
+      const ax = wrapDelta(charging.x - p.x), az = wrapDelta(charging.z - p.z);
+      threatAngle = ((Math.atan2(ax, -az) - p.yaw) * 180 / Math.PI + 540) % 360 - 180;
+    }
+    UI.danger(threat, dangerText, threatAngle,
+      charging ? charging.state === 'charge' && charging.dist < charging.k.lockDist + 2 : false);
 
     this.hbT -= raw;
     if (threat > 0.45 && this.hbT <= 0) {
@@ -611,7 +763,9 @@ export class Game {
     UI.setCombo(this.inv);
     UI.setVitals(p);
     UI.setWeapon(this.weapons);
-    UI.updateRadar(p, CAMPS, this.animals.list, this.pickups.list);
+    UI.setLevel(this.inv);
+    UI.setBuffs(this.effects);
+    UI.updateRadar(p, CAMPS, this.animals.list, this.pickups.list, this.radarRange || 130);
 
     // --- конец дня ---
     if (left <= 0) this._end(false, 'Солнце село. Ты дошёл до вечера живым.');

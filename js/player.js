@@ -23,6 +23,9 @@ export class Player {
     this.bob = 0;
     this.stepAcc = 0;
     this.speedScale = 1;
+    this.levelSpeed = 1;        // множитель от уровня охотника
+    this.levelStamina = 0;
+    this.staminaFree = false;   // настойка из фляжки
     this.keys = Object.create(null);
     this.recoilKick = 0;
     this.hurtFlash = 0;
@@ -36,7 +39,11 @@ export class Player {
     const kd = (e) => {
       if (e.repeat) return;
       this.keys[e.code] = true;
-      if (e.code === 'Space' && this.locked) { e.preventDefault(); this.tryDodge(); }
+      if (e.code === 'Space' && this.locked) {
+        e.preventDefault();
+        const res = this.tryDodge();
+        if (this.onDodgeResult) this.onDodgeResult(res);
+      }
       if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') this.wantSprint = true;
     };
     const ku = (e) => {
@@ -75,9 +82,13 @@ export class Player {
     catch (e) { /* уже отпущен */ }
   }
 
+  /**
+   * Рывок. Возвращает true, если получилось, иначе строку с причиной —
+   * молчаливый отказ читается как «пробел не работает».
+   */
   tryDodge() {
-    if (this.dodgeCd > 0 || this.dodgeT > 0) return false;
-    if (this.stamina < CONFIG.dodgeCost) return false;
+    if (this.dodgeT > 0) return 'уже в рывке';
+    if (this.dodgeCd > 0) return 'не отдышался';
 
     let ix = 0, iz = 0;
     if (this.keys['KeyW']) iz += 1;
@@ -111,15 +122,18 @@ export class Player {
     }
     this.dodgeT = CONFIG.dodgeTime;
     this.dodgeCd = CONFIG.dodgeCooldown;
-    this.stamina -= CONFIG.dodgeCost;
+    // уворот от медведя не должен срываться из-за пустой полоски сил
+    this.stamina = Math.max(0, this.stamina - CONFIG.dodgeCost);
     Audio.noise({ dur: 0.24, gain: 0.13, type: 'bandpass', freq: 900, sweepTo: 300, q: 0.9 });
     return true;
   }
 
   get dodging() { return this.dodgeT > 0; }
+  /** Небольшой запас после рывка — иначе попадание «в спину» на выходе. */
+  get evading() { return this.dodgeT > 0 || this.dodgeCd > CONFIG.dodgeCooldown - CONFIG.dodgeTime - 0.18; }
 
   /** Радиус попадания: во время рывка игрок «уходит» — цель меньше. */
-  get hitRadius() { return this.dodging ? 0.48 : 1.15; }
+  get hitRadius() { return this.evading ? 0.42 : 1.15; }
 
   damage(amount, src) {
     if (!this.alive) return;
@@ -151,12 +165,12 @@ export class Player {
     if (moving) { const l = Math.hypot(ix, iz); ix /= l; iz /= l; }
 
     const sprinting = this.wantSprint && moving && this.stamina > 1 && !inWater;
-    let speed = (sprinting ? CONFIG.sprintSpeed : CONFIG.walkSpeed) * this.speedScale;
+    let speed = (sprinting ? CONFIG.sprintSpeed : CONFIG.walkSpeed) * this.speedScale * this.levelSpeed;
     if (inWater) speed *= 0.52;
 
-    if (sprinting) this.stamina -= CONFIG.staminaDrain * dt;
+    if (sprinting && !this.staminaFree) this.stamina -= CONFIG.staminaDrain * dt;
     else this.stamina += CONFIG.staminaRegen * dt * (moving ? 0.6 : 1);
-    this.stamina = clamp(this.stamina, 0, CONFIG.maxStamina);
+    this.stamina = clamp(this.stamina, 0, CONFIG.maxStamina + this.levelStamina);
 
     const sy = Math.sin(this.yaw), cy = Math.cos(this.yaw);
     let wx = ix * cy - iz * sy;
@@ -243,6 +257,10 @@ export class Player {
     this.hp = CONFIG.maxHp;
     this.stamina = CONFIG.maxStamina;
     this.alive = true;
+    this.levelSpeed = 1;
+    this.levelStamina = 0;
+    this.speedScale = 1;
+    this.staminaFree = false;
     this.vx = this.vz = 0;
     this.dodgeT = this.dodgeCd = 0;
     this.lastDamage = 99;

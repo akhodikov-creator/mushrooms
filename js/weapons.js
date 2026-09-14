@@ -1,9 +1,41 @@
 import * as THREE from 'three';
 import { mergeParts } from './geo.js';
 import { Audio } from './audio.js';
+import { metalTex, woodTex } from './textures.js';
 import { clamp, dampTo, lerp } from './utils.js';
 
-const MAT_VM = new THREE.MeshLambertMaterial({ vertexColors: true });
+/* ============================================================
+   Модели в руках. Отдельные PBR-материалы: дерево, вороненая
+   сталь, латунь — с картой окружения металл наконец блестит.
+   ============================================================ */
+const texMetal = metalTex();
+const texWood = woodTex();
+
+const VM = {
+  steel: new THREE.MeshStandardMaterial({
+    vertexColors: true, map: texMetal, roughness: 0.34, metalness: 0.92,
+  }),
+  blade: new THREE.MeshStandardMaterial({
+    vertexColors: true, map: texMetal, roughness: 0.14, metalness: 1.0,
+  }),
+  wood: new THREE.MeshStandardMaterial({
+    vertexColors: true, map: texWood, roughness: 0.72, metalness: 0.0,
+  }),
+  brass: new THREE.MeshStandardMaterial({
+    vertexColors: true, map: texMetal, roughness: 0.3, metalness: 0.95,
+  }),
+  rubber: new THREE.MeshStandardMaterial({
+    vertexColors: true, roughness: 0.94, metalness: 0.0,
+  }),
+};
+
+export function applyWeaponEnv(env) {
+  for (const m of Object.values(VM)) {
+    m.envMap = env;
+    m.envMapIntensity = 1.35;
+    m.needsUpdate = true;
+  }
+}
 
 function paint(geo, hex) {
   const c = new THREE.Color(hex);
@@ -17,69 +49,160 @@ const box = (w, h, d, x, y, z, col) => {
   const g = new THREE.BoxGeometry(w, h, d); g.translate(x, y, z); return paint(g, col);
 };
 
-/* ---------- модель ножа (грибной, с изогнутым лезвием) ---------- */
-function buildKnife() {
-  const p = [];
-  // рукоять — дерево
-  const h = new THREE.CylinderGeometry(0.019, 0.024, 0.11, 8);
-  h.rotateX(Math.PI / 2);
-  h.translate(0, 0, 0.055);
-  p.push(paint(h, 0x6b4a26));
-  p.push(box(0.05, 0.012, 0.012, 0, 0, -0.005, 0xb8b0a0));  // упор
-  // лезвие
-  const b = new THREE.BoxGeometry(0.009, 0.042, 0.15);
-  b.translate(0, 0.008, -0.082);
-  p.push(paint(b, 0xd8dce2));
-  const tip = new THREE.ConeGeometry(0.022, 0.055, 4);
-  tip.rotateX(-Math.PI / 2);
-  tip.scale(0.5, 1, 1);
-  tip.translate(0, 0.008, -0.178);
-  p.push(paint(tip, 0xe2e6ea));
-  // щёточка на торце рукояти — как на настоящих грибных ножах
-  const br = new THREE.CylinderGeometry(0.016, 0.02, 0.03, 7);
-  br.rotateX(Math.PI / 2);
-  br.translate(0, 0, 0.125);
-  p.push(paint(br, 0xc9a24a));
-  return new THREE.Mesh(mergeParts(p), MAT_VM);
+/** Собирает группу из кусков, разложенных по материалам. */
+function assemble(groups) {
+  const g = new THREE.Group();
+  for (const [mat, parts] of groups) {
+    if (!parts.length) continue;
+    const m = new THREE.Mesh(mergeParts(parts), mat);
+    m.castShadow = false;
+    g.add(m);
+  }
+  return g;
 }
 
-/* ---------- модель ТТ ---------- */
-function buildPistol() {
-  const g = new THREE.Group();
-  const p = [];
-  const steel = 0x3a3e45, steel2 = 0x4a4f57;
-  p.push(box(0.032, 0.055, 0.2, 0, 0.012, -0.055, steel));       // рамка
-  p.push(box(0.028, 0.02, 0.13, 0, 0.048, -0.09, steel2));        // ствол/кожух
-  p.push(box(0.016, 0.016, 0.03, 0, 0.048, -0.16, 0x1c1e22));     // срез ствола
-  // рукоять с накладками
-  const grip = new THREE.BoxGeometry(0.034, 0.11, 0.05);
-  grip.translate(0, -0.05, 0.02);
-  const gg = grip.clone();
-  gg.rotateX(-0.22);
-  p.push(paint(gg, 0x4a3418));
-  p.push(box(0.012, 0.03, 0.016, 0, -0.012, -0.012, 0x1a1c20));   // спусковой крючок
-  p.push(box(0.026, 0.008, 0.06, 0, -0.018, -0.028, steel));      // спусковая скоба
-  p.push(box(0.006, 0.008, 0.008, 0, 0.064, -0.15, 0xb0b4ba));    // мушка
-  const body = new THREE.Mesh(mergeParts(p), MAT_VM);
-  g.add(body);
+/* ---------- грибной нож: изогнутое лезвие, щётка на торце ---------- */
+function buildKnife() {
+  const steel = [], wood = [], brass = [];
 
-  // затвор — двигается при выстреле
-  const slide = new THREE.Mesh(box(0.033, 0.026, 0.145, 0, 0.048, -0.06, 0x484d55), MAT_VM);
-  g.add(slide);
+  // рукоять — точёный профиль под пальцы
+  const prof = [];
+  for (let i = 0; i <= 12; i++) {
+    const t = i / 12;
+    const r = 0.019 + Math.sin(t * Math.PI) * 0.0075 + t * 0.004;
+    prof.push(new THREE.Vector2(r, t * 0.115));
+  }
+  const h = new THREE.LatheGeometry(prof, 14);
+  h.rotateX(Math.PI / 2);
+  h.translate(0, 0, 0.012);
+  wood.push(paint(h, 0x8a6234));
+
+  // латунная больстер-шайба
+  const bol = new THREE.CylinderGeometry(0.0235, 0.0215, 0.012, 14);
+  bol.rotateX(Math.PI / 2);
+  bol.translate(0, 0, 0.006);
+  brass.push(paint(bol, 0xc8a54a));
+
+  // клинок: сужается и загибается кверху, с фаской
+  const bl = new THREE.BoxGeometry(0.0075, 0.032, 0.145, 1, 3, 10);
+  const bp = bl.attributes.position;
+  for (let i = 0; i < bp.count; i++) {
+    const z = bp.getZ(i);
+    const t = (-z + 0.0725) / 0.145;            // 0 у рукояти, 1 у острия
+    const taper = 1 - t * t * 0.72;
+    bp.setX(i, bp.getX(i) * (1 - Math.abs(bp.getY(i)) * 22));  // фаска к режущей кромке
+    bp.setY(i, bp.getY(i) * taper + t * t * 0.012);            // подъём острия
+  }
+  bl.computeVertexNormals();
+  bl.translate(0, 0.004, -0.078);
+  steel.push(paint(bl, 0xd6dae0));
+
+  // щётка на торце рукояти
+  const br = new THREE.CylinderGeometry(0.017, 0.021, 0.026, 12);
+  br.rotateX(Math.PI / 2);
+  br.translate(0, 0, 0.132);
+  const bristles = paint(br, 0xd8b45c);
+  wood.push(bristles);
+
+  const g = assemble([[VM.steel, steel], [VM.wood, wood], [VM.brass, brass]]);
+  return g;
+}
+
+/* ---------- ТТ: рамка, затвор с насечкой, накладки ---------- */
+function buildPistol() {
+  const steel = [], wood = [], brass = [];
+  const dark = 0x6a6f78, darker = 0x565b64;
+
+  // рамка
+  steel.push(box(0.030, 0.048, 0.19, 0, 0.010, -0.05, dark));
+  // спусковая скоба
+  const guard = new THREE.TorusGeometry(0.021, 0.0045, 6, 14, Math.PI * 1.15);
+  guard.rotateY(Math.PI / 2);
+  guard.rotateZ(-0.5);
+  guard.translate(0, -0.017, -0.030);
+  steel.push(paint(guard, dark));
+  steel.push(box(0.008, 0.026, 0.010, 0, -0.008, -0.030, 0x3c4048));   // крючок
+
+  // рукоять с наклоном
+  const grip = new THREE.BoxGeometry(0.031, 0.115, 0.046, 1, 3, 1);
+  const gp = grip.attributes.position;
+  for (let i = 0; i < gp.count; i++) {
+    const t = (gp.getY(i) + 0.0575) / 0.115;
+    gp.setZ(i, gp.getZ(i) + (1 - t) * 0.028);      // наклон назад
+    gp.setX(i, gp.getX(i) * (0.92 + t * 0.1));
+  }
+  grip.computeVertexNormals();
+  grip.translate(0, -0.062, 0.012);
+  steel.push(paint(grip, darker));
+  // деревянные накладки по бокам
+  for (const sx of [-1, 1]) {
+    const pl = new THREE.BoxGeometry(0.005, 0.098, 0.040, 1, 3, 1);
+    const pp = pl.attributes.position;
+    for (let i = 0; i < pp.count; i++) {
+      const t = (pp.getY(i) + 0.049) / 0.098;
+      pp.setZ(i, pp.getZ(i) + (1 - t) * 0.026);
+    }
+    pl.computeVertexNormals();
+    pl.translate(sx * 0.0168, -0.062, 0.012);
+    wood.push(paint(pl, 0x6b4a24));
+  }
+  // звезда на накладке — как на настоящем ТТ
+  for (const sx of [-1, 1]) {
+    const st = new THREE.CylinderGeometry(0.008, 0.008, 0.002, 5);
+    st.rotateZ(Math.PI / 2);
+    st.translate(sx * 0.0192, -0.055, 0.014);
+    brass.push(paint(st, 0xc9a94e));
+  }
+  // пятка магазина
+  steel.push(box(0.032, 0.008, 0.044, 0, -0.118, 0.024, darker));
+
+  // курок
+  const ham = new THREE.CylinderGeometry(0.011, 0.011, 0.009, 10, 1, false, 0, Math.PI);
+  ham.rotateZ(Math.PI / 2);
+  ham.rotateY(Math.PI / 2);
+  ham.translate(0, 0.040, 0.036);
+  steel.push(paint(ham, 0x3c4048));
+
+  // мушка
+  steel.push(box(0.005, 0.007, 0.008, 0, 0.062, -0.138, 0xb8bcc4));
+  // целик
+  steel.push(box(0.014, 0.006, 0.008, 0, 0.060, 0.026, 0xb8bcc4));
+
+  const body = assemble([[VM.steel, steel], [VM.wood, wood], [VM.brass, brass]]);
+
+  // затвор — отдельной деталью, ездит при выстреле
+  const sl = [];
+  sl.push(box(0.032, 0.030, 0.150, 0, 0.044, -0.055, 0x767c86));
+  // насечка на затворе
+  for (let i = 0; i < 9; i++) {
+    sl.push(box(0.0335, 0.024, 0.0028, 0, 0.044, 0.004 + i * 0.006, 0x4e535c));
+  }
+  // срез ствола
+  const muz = new THREE.CylinderGeometry(0.0075, 0.0075, 0.016, 12);
+  muz.rotateX(Math.PI / 2);
+  muz.translate(0, 0.044, -0.136);
+  sl.push(paint(muz, 0x24282e));
+  const slide = new THREE.Mesh(mergeParts(sl), VM.steel);
+
+  const g = new THREE.Group();
+  g.add(body, slide);
   g.userData.slide = slide;
 
-  // вспышка
+  // дульная вспышка
   const flash = new THREE.Mesh(
-    new THREE.ConeGeometry(0.05, 0.14, 5),
-    new THREE.MeshBasicMaterial({ color: 0xffd070, transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false })
+    new THREE.ConeGeometry(0.055, 0.16, 6),
+    new THREE.MeshBasicMaterial({
+      color: 0xffd070, transparent: true, opacity: 0.95,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    })
   );
   flash.rotation.x = -Math.PI / 2;
-  flash.position.set(0, 0.048, -0.24);
+  flash.position.set(0, 0.044, -0.22);
   flash.visible = false;
   g.add(flash);
   g.userData.flash = flash;
 
-  const fl = new THREE.PointLight(0xffc060, 0, 12, 2);
+  const fl = new THREE.PointLight(0xffc060, 0, 14, 2);
   fl.position.set(0, 0.05, -0.2);
   g.add(fl);
   g.userData.light = fl;
@@ -126,12 +249,12 @@ export class Weapons {
     this.pistol.visible = false;
 
     this.basePos = {
-      knife: new THREE.Vector3(0.23, -0.24, -0.46),
-      pistol: new THREE.Vector3(0.12, -0.17, -0.38),
+      knife: new THREE.Vector3(0.22, -0.20, -0.42),
+      pistol: new THREE.Vector3(0.155, -0.125, -0.34),
     };
     this.baseRot = {
-      knife: new THREE.Euler(-0.34, -0.95, 0.5),
-      pistol: new THREE.Euler(0.02, 0.06, 0),
+      knife: new THREE.Euler(-0.12, -1.5, 0.38),
+      pistol: new THREE.Euler(0.02, 0.22, -0.06),
     };
     this._place();
   }

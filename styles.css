@@ -225,7 +225,62 @@ ul.keys em{color:var(--gold);font-style:normal}
 #timer-fill{background:linear-gradient(90deg,#c8a24a,#ffdc7a)}
 
 /* радар */
-#radar{position:absolute;top:16px;right:16px;opacity:.92;filter:drop-shadow(0 4px 12px rgba(0,0,0,.6))}
+.radarbox{position:absolute;top:14px;right:14px;text-align:center}
+#radar{display:block;opacity:.96;filter:drop-shadow(0 6px 16px rgba(0,0,0,.7))}
+#radar-label{
+  margin-top:-6px;font-size:10.5px;letter-spacing:.1em;color:var(--gold);
+  text-shadow:0 2px 8px rgba(0,0,0,.9);
+}
+
+/* активные бонусы */
+#buffs{
+  position:absolute;top:222px;right:16px;
+  display:flex;flex-direction:column;gap:5px;align-items:flex-end;
+}
+.buff{
+  display:flex;align-items:center;gap:7px;
+  background:rgba(8,14,10,.7);border:1px solid var(--line);
+  border-left:3px solid var(--green);border-radius:8px;
+  padding:4px 10px;font-size:12px;backdrop-filter:blur(5px);
+}
+.buff .ic{font-size:14px}
+.buff .nm{color:#cfdcc0}
+.buff b{color:var(--gold);font-variant-numeric:tabular-nums;min-width:26px;text-align:right}
+
+/* уровень охотника */
+.levelbox{margin-bottom:10px;width:212px}
+.levelbox .lvl{display:flex;align-items:baseline;gap:6px}
+.levelbox .cap{font-size:10px;letter-spacing:.16em;color:var(--dim);text-transform:uppercase}
+#level-num{
+  font-size:22px;font-weight:800;color:#9fe05a;line-height:1;
+  text-shadow:0 2px 12px rgba(0,0,0,.8);
+}
+.levelbox .bar{margin-top:4px}
+#level-fill{background:linear-gradient(90deg,#4e7a26,#9fe05a);transition:width .2s}
+.levelbox .lvl.maxed #level-num{color:var(--gold)}
+
+/* стрелка на зверя */
+#threat-arrow{
+  position:absolute;left:50%;top:50%;width:40px;height:120px;
+  transform:translate(-50%,-50%);
+  transform-origin:50% 50%;
+  color:#ff4028;opacity:0;pointer-events:none;
+  transition:opacity .18s;
+  filter:drop-shadow(0 0 10px rgba(255,60,30,.9));
+}
+#threat-arrow svg{display:block;transform:translateY(-34px)}
+#threat-arrow.behind{color:#ff8a2a}
+
+/* подсказка «жми сейчас» */
+#now-cue{
+  position:absolute;left:50%;top:calc(50% + 96px);transform:translateX(-50%) scale(.9);
+  font-size:19px;font-weight:800;letter-spacing:.14em;color:#fff;
+  background:rgba(200,30,10,.85);border-radius:10px;padding:7px 18px;
+  opacity:0;transition:opacity .12s,transform .12s;
+  text-shadow:0 2px 10px rgba(0,0,0,.8);
+}
+#now-cue.on{opacity:1;transform:translateX(-50%) scale(1);animation:cue .38s infinite alternate}
+@keyframes cue{from{background:rgba(200,30,10,.85)}to{background:rgba(255,80,30,.95)}}
 
 /* комбо */
 .combo{
@@ -329,7 +384,7 @@ ul.keys em{color:var(--gold);font-style:normal}
 
 /* всплывашки */
 #toasts{
-  position:absolute;right:20px;top:190px;width:290px;
+  position:absolute;right:20px;top:300px;width:290px;
   display:flex;flex-direction:column;gap:6px;align-items:flex-end;
 }
 .toast{

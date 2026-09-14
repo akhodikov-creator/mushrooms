@@ -19,7 +19,37 @@ export class Inventory {
     this.oles = 0;
     this.kills = 0;
     this.deliveries = 0;
+    this.level = 1;
+    this.xp = 0;
   }
+
+  /** Сколько опыта нужно, чтобы уйти с текущего уровня. */
+  get xpToNext() {
+    return Math.round(CONFIG.xpPerLevel * Math.pow(CONFIG.xpLevelGrowth, this.level - 1));
+  }
+
+  get xpRatio() { return clamp(this.xp / this.xpToNext, 0, 1); }
+
+  /**
+   * Начисляет опыт. Возвращает число новых уровней (0, если не хватило).
+   */
+  addXp(amount) {
+    if (this.level >= CONFIG.maxLevel) return 0;
+    this.xp += amount;
+    let gained = 0;
+    while (this.level < CONFIG.maxLevel && this.xp >= this.xpToNext) {
+      this.xp -= this.xpToNext;
+      this.level++;
+      gained++;
+    }
+    if (this.level >= CONFIG.maxLevel) this.xp = 0;
+    return gained;
+  }
+
+  /** Прибавки от уровня — их применяет игрок и сборщик грибов. */
+  get speedBonus() { return 1 + (this.level - 1) * CONFIG.levelSpeed; }
+  get staminaBonus() { return (this.level - 1) * CONFIG.levelStamina; }
+  get pickRangeBonus() { return (this.level - 1) * CONFIG.levelPickRange; }
 
   get container() { return CONTAINERS[this.tier]; }
   get cap() { return this.container.cap; }

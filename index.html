@@ -46,7 +46,7 @@
         <ul class="keys">
           <li><b>WASD</b> идти · <b>Shift</b> бежать</li>
           <li><b>ЛКМ</b> сорвать гриб / ударить / выстрелить</li>
-          <li><b>Пробел</b> <em>рывок в сторону</em> — так уходят от зверя</li>
+          <li><b>Пробел</b> <em>рывок в сторону</em> — жми, когда зверь уже близко</li>
           <li><b>E</b> сдать грибы / взять находку</li>
           <li><b>1</b> нож · <b>2</b> ТТ · <b>R</b> перезарядка · <b>ПКМ</b> сменить</li>
           <li><b>Esc</b> пауза</li>
@@ -55,6 +55,7 @@
           <p><b>День — 12 минут.</b> Собирай быстро: каждый гриб подряд поднимает множитель до ×5.</p>
           <p>Полную тару сдавай в приёмном пункте (жёлтый луч, метка на радаре) — взамен дадут больше: корзина → ведро → рюкзак → тележка → прицеп.</p>
           <p><b>Зверь.</b> Когда он роет землю и ревёт — он уже выбрал траекторию. Стой, жди, и в последний момент — <b>Пробел</b> в сторону. Пробежит мимо: <span class="ole">¡OLÉ!</span> и множитель. Медведь бьёт насмерть.</p>
+          <p><b>Уровень.</b> За убитого зверя растёт уровень охотника: быстрее бегаешь, дольше держишься, дальше дотягиваешься до грибов. Действует до конца дня.</p>
           <p class="dim">Ядовитые грибы сбрасывают серию. Гигантский мухомор лучше не трогать. Совсем.</p>
         </div>
       </div>
@@ -101,7 +102,12 @@
     </div>
   </div>
 
-  <canvas id="radar" width="132" height="132"></canvas>
+  <div class="radarbox">
+    <canvas id="radar" width="200" height="200"></canvas>
+    <div id="radar-label">пункт — м</div>
+  </div>
+
+  <div id="buffs"></div>
 
   <div id="combo" class="combo">
     <div class="x">×1.00</div>
@@ -113,6 +119,10 @@
     <div class="scorebox">
       <div id="score">0</div>
       <div id="score-banked">сдано 0</div>
+    </div>
+    <div class="levelbox">
+      <div class="lvl"><span class="cap">ур.</span><span id="level-num">1</span></div>
+      <div class="bar"><div id="level-fill"></div></div>
     </div>
     <div class="basket">
       <div id="basket-icon">🧺</div>
@@ -133,6 +143,11 @@
       <span id="weapon-ammo" class="ammo hint"></span>
     </div>
   </div>
+
+  <div id="threat-arrow"><svg viewBox="0 0 40 120" width="40" height="120">
+    <polygon points="20,2 33,30 24,30 24,60 16,60 16,30 7,30" fill="currentColor"/>
+  </svg></div>
+  <div id="now-cue">ПРОБЕЛ — СЕЙЧАС!</div>
 
   <div id="crosshair" class="ch"><i></i></div>
   <div id="prompt" hidden></div>

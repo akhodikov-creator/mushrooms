@@ -16,6 +16,7 @@ export const UI = {
       'hurt', 'banner', 'banner-title', 'banner-sub', 'end-title', 'end-body', 'end-board',
       'radar', 'hp-num', 'tab-board', 'btn-again', 'btn-menu', 'btn-resume', 'btn-quit',
       'sens', 'sens-val', 'vol', 'vol-val', 'quality', 'vignette', 'end-sub', 'threat-ring',
+      'level-num', 'level-fill', 'buffs', 'threat-arrow', 'radar-label', 'now-cue',
     ];
     for (const id of ids) this.el[id] = $(id);
     this.radarCtx = this.el.radar ? this.el.radar.getContext('2d') : null;
@@ -88,6 +89,28 @@ export const UI = {
     this.el.vignette.style.opacity = (0.16 + (1 - hp) * 0.46).toFixed(2);
   },
 
+  setLevel(inv) {
+    this.el['level-num'].textContent = inv.level;
+    this.el['level-fill'].style.width = (inv.xpRatio * 100).toFixed(1) + '%';
+    this.el['level-num'].parentElement.classList.toggle('maxed', inv.xpRatio >= 1 && inv.level >= 12);
+  },
+
+  /** Полоса активных бонусов с обратным отсчётом. */
+  setBuffs(list) {
+    const box = this.el.buffs;
+    const want = list.map((e) => e.id).join(',');
+    if (box.dataset.keys !== want) {
+      box.dataset.keys = want;
+      box.innerHTML = list.map((e) =>
+        `<div class="buff" data-id="${e.id}"><span class="ic">${e.icon}</span>` +
+        `<span class="nm">${e.name}</span><b></b></div>`).join('');
+    }
+    for (const e of list) {
+      const el = box.querySelector(`[data-id="${e.id}"] b`);
+      if (el) el.textContent = Math.ceil(e.t) + 'с';
+    }
+  },
+
   setWeapon(w) {
     if (w.current === 'knife') {
       this.el['weapon-name'].textContent = '🔪 Нож';
@@ -134,13 +157,31 @@ export const UI = {
     this._bt = setTimeout(() => { this.el.banner.className = 'banner ' + cls; }, ms);
   },
 
-  danger(level, text) {
+  danger(level, text, angle = null, nowCue = false) {
     const d = this.el.danger;
-    if (level <= 0.01) { d.classList.remove('on'); d.style.opacity = 0; return; }
+    if (level <= 0.01) {
+      d.classList.remove('on');
+      d.style.opacity = 0;
+      this.el['threat-arrow'].style.opacity = 0;
+      this.el['now-cue'].classList.remove('on');
+      return;
+    }
     d.classList.add('on');
     d.style.opacity = (level * 0.92).toFixed(2);
     this.el['danger-text'].textContent = text || '';
     this.el['threat-ring'].style.opacity = level > 0.55 ? '1' : '0';
+
+    // Стрелка вокруг прицела: показывает, с какой стороны зверь.
+    // Без неё непонятно, куда вообще уходить.
+    const arrow = this.el['threat-arrow'];
+    if (angle === null) {
+      arrow.style.opacity = 0;
+    } else {
+      arrow.style.opacity = 1;
+      arrow.style.transform = `translate(-50%,-50%) rotate(${angle.toFixed(1)}deg)`;
+      arrow.classList.toggle('behind', Math.abs(angle) > 100);
+    }
+    this.el['now-cue'].classList.toggle('on', nowCue);
   },
 
   /* ---------------- радар ---------------- */
@@ -148,70 +189,129 @@ export const UI = {
     const ctx = this.radarCtx;
     if (!ctx) return;
     const W = this.el.radar.width, H = this.el.radar.height;
-    const cx = W / 2, cy = H / 2, R = W / 2 - 3;
+    const cx = W / 2, cy = H / 2, R = W / 2 - 12;
     ctx.clearRect(0, 0, W, H);
 
-    // фон
-    ctx.fillStyle = 'rgba(10,16,10,0.55)';
+    /* --- подложка --- */
+    const grd = ctx.createRadialGradient(cx, cy, R * 0.1, cx, cy, R);
+    grd.addColorStop(0, 'rgba(18,30,18,0.82)');
+    grd.addColorStop(1, 'rgba(8,14,10,0.66)');
+    ctx.fillStyle = grd;
     ctx.beginPath(); ctx.arc(cx, cy, R, 0, TAU); ctx.fill();
-    ctx.strokeStyle = 'rgba(150,200,140,0.35)'; ctx.lineWidth = 1.5;
-    ctx.stroke();
-    ctx.strokeStyle = 'rgba(150,200,140,0.14)';
-    ctx.beginPath(); ctx.arc(cx, cy, R * 0.5, 0, TAU); ctx.stroke();
 
-    const put = (wx, wz, draw) => {
+    /* --- сектор обзора: сразу видно, куда смотришь --- */
+    ctx.fillStyle = 'rgba(180,220,150,0.10)';
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, R, -Math.PI / 2 - 0.62, -Math.PI / 2 + 0.62);
+    ctx.closePath(); ctx.fill();
+
+    /* --- кольца дальности --- */
+    ctx.strokeStyle = 'rgba(150,200,140,0.13)';
+    ctx.lineWidth = 1;
+    for (const k of [0.33, 0.66]) {
+      ctx.beginPath(); ctx.arc(cx, cy, R * k, 0, TAU); ctx.stroke();
+    }
+    ctx.strokeStyle = 'rgba(160,210,150,0.4)';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.arc(cx, cy, R, 0, TAU); ctx.stroke();
+
+    /* --- север --- */
+    const northA = -player.yaw - Math.PI / 2;
+    const nx = cx + Math.cos(northA) * (R + 6), ny = cy + Math.sin(northA) * (R + 6);
+    ctx.fillStyle = '#cfe0c0';
+    ctx.font = 'bold 10px system-ui, sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('С', nx, ny);
+
+    /* --- перевод мировых координат в экран радара --- */
+    const put = (wx, wz) => {
       const dx = wrapDelta(wx - player.x);
       const dz = wrapDelta(wz - player.z);
-      // поворот в систему камеры: вперёд игрока — вверх
       const s = Math.sin(-player.yaw), c = Math.cos(-player.yaw);
-      let rx = dx * c - dz * s;
-      let rz = dx * s + dz * c;
-      // вперёд игрока = -Z, значит вверх экрана
-      let px = rx / range * R;
-      let py = rz / range * R;
+      const rx = dx * c - dz * s;
+      const rz = dx * s + dz * c;
+      let px = (rx / range) * R;
+      let py = (rz / range) * R;
       const d = Math.hypot(px, py);
-      const edge = d > R - 6;
-      if (edge) { const k = (R - 6) / d; px *= k; py *= k; }
-      draw(cx + px, cy + py, edge);
+      const edge = d > R - 5;
+      if (edge && d > 0) { const k = (R - 5) / d; px *= k; py *= k; }
+      return { x: cx + px, y: cy + py, edge, dist: Math.hypot(dx, dz) };
     };
 
-    // приёмные пункты
+    /* --- треугольник-указатель для того, что за краем --- */
+    const edgeMark = (x, y, color) => {
+      const a = Math.atan2(y - cy, x - cx);
+      ctx.save();
+      ctx.translate(cx + Math.cos(a) * (R + 4), cy + Math.sin(a) * (R + 4));
+      ctx.rotate(a + Math.PI / 2);
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(0, -4); ctx.lineTo(3.6, 3); ctx.lineTo(-3.6, 3);
+      ctx.closePath(); ctx.fill();
+      ctx.restore();
+    };
+
+    /* --- приёмные пункты --- */
+    let nearest = null;
     for (const cp of camps) {
-      put(cp.x, cp.z, (x, y, edge) => {
-        ctx.fillStyle = edge ? 'rgba(255,205,90,0.65)' : '#ffcd5a';
-        ctx.beginPath();
-        ctx.moveTo(x, y - 5); ctx.lineTo(x + 4.5, y + 4); ctx.lineTo(x - 4.5, y + 4);
-        ctx.closePath(); ctx.fill();
-      });
+      const q = put(cp.x, cp.z);
+      if (!nearest || q.dist < nearest.dist) nearest = q;
+      ctx.fillStyle = q.edge ? 'rgba(255,205,90,0.55)' : '#ffcd5a';
+      ctx.beginPath();
+      ctx.moveTo(q.x, q.y - 6); ctx.lineTo(q.x + 5, q.y + 4); ctx.lineTo(q.x - 5, q.y + 4);
+      ctx.closePath(); ctx.fill();
+      if (q.edge) edgeMark(q.x, q.y, 'rgba(255,205,90,0.8)');
     }
 
-    // находки
+    /* --- находки --- */
     for (const p of pickups) {
-      put(p.x, p.z, (x, y) => {
-        ctx.fillStyle = p.type === 'pistol' ? '#ffdd55' : '#7fd6ff';
-        ctx.beginPath(); ctx.arc(x, y, 2.6, 0, TAU); ctx.fill();
-      });
+      const q = put(p.x, p.z);
+      const col = (p.def && p.def.radar) || '#7fd6ff';
+      ctx.fillStyle = col;
+      ctx.beginPath(); ctx.arc(q.x, q.y, 3.4, 0, TAU); ctx.fill();
+      ctx.strokeStyle = col; ctx.lineWidth = 1.2; ctx.globalAlpha = 0.55;
+      ctx.beginPath(); ctx.arc(q.x, q.y, 6.5, 0, TAU); ctx.stroke();
+      ctx.globalAlpha = 1;
+      if (q.edge) edgeMark(q.x, q.y, col);
     }
 
-    // звери
+    /* --- звери --- */
     for (const a of animals) {
-      if (a.dead) continue;
-      put(a.x, a.z, (x, y) => {
-        const hot = a.state === 'charge' || a.state === 'telegraph';
-        ctx.fillStyle = hot ? '#ff3322' : '#ff8866';
-        ctx.beginPath(); ctx.arc(x, y, hot ? 4.4 : 3.2, 0, TAU); ctx.fill();
-        if (hot) {
-          ctx.strokeStyle = 'rgba(255,60,40,0.6)'; ctx.lineWidth = 1.4;
-          ctx.beginPath(); ctx.arc(x, y, 7.5, 0, TAU); ctx.stroke();
+      if (a.dead || a.state === 'leave') continue;
+      const q = put(a.x, a.z);
+      const hot = a.state === 'charge' || a.state === 'telegraph';
+      ctx.fillStyle = hot ? '#ff3322' : '#ff9070';
+      ctx.beginPath(); ctx.arc(q.x, q.y, hot ? 5 : 3.6, 0, TAU); ctx.fill();
+      if (hot) {
+        const pulse = 8 + Math.sin(performance.now() / 90) * 3;
+        ctx.strokeStyle = 'rgba(255,60,40,0.75)'; ctx.lineWidth = 1.6;
+        ctx.beginPath(); ctx.arc(q.x, q.y, pulse, 0, TAU); ctx.stroke();
+        // линия тарана
+        if (a.state === 'charge') {
+          const s = Math.sin(-player.yaw), c = Math.cos(-player.yaw);
+          const lx = a.lockDx * c - a.lockDz * s;
+          const lz = a.lockDx * s + a.lockDz * c;
+          ctx.strokeStyle = 'rgba(255,90,60,0.5)';
+          ctx.beginPath();
+          ctx.moveTo(q.x, q.y);
+          ctx.lineTo(q.x + lx * 22, q.y + lz * 22);
+          ctx.stroke();
         }
-      });
+      }
+      if (q.edge) edgeMark(q.x, q.y, hot ? '#ff3322' : '#ff9070');
     }
 
-    // игрок
-    ctx.fillStyle = '#d8f0c0';
+    /* --- игрок --- */
+    ctx.fillStyle = '#eaf6dc';
     ctx.beginPath();
-    ctx.moveTo(cx, cy - 6); ctx.lineTo(cx + 4, cy + 4); ctx.lineTo(cx, cy + 2); ctx.lineTo(cx - 4, cy + 4);
+    ctx.moveTo(cx, cy - 7); ctx.lineTo(cx + 5, cy + 5);
+    ctx.lineTo(cx, cy + 2.5); ctx.lineTo(cx - 5, cy + 5);
     ctx.closePath(); ctx.fill();
+
+    if (this.el['radar-label'] && nearest) {
+      this.el['radar-label'].textContent = `пункт ${Math.round(nearest.dist)} м`;
+    }
   },
 
   /* ---------------- доска рекордов ---------------- */

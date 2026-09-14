@@ -5,9 +5,41 @@ import { Audio } from './audio.js';
 import {
   TAU, terrainHeight, wrapCoord, wrapDelta, clamp, lerp, dampTo, isWater, WATER_LEVEL,
 } from './utils.js';
+import { furTex, scaleTex } from './textures.js';
 
-const MAT_ANIMAL = new THREE.MeshLambertMaterial({ vertexColors: true });
+/* ============================================================
+   Материалы зверей: шерсть рисуется в canvas, поэтому силуэт
+   перестаёт быть «пластилиновым» даже на простой геометрии.
+   ============================================================ */
+const MAT_FUR = {
+  bear: new THREE.MeshStandardMaterial({
+    vertexColors: true, map: furTex('bear', '#4a3122', 11), roughness: 0.95, metalness: 0,
+  }),
+  boar: new THREE.MeshStandardMaterial({
+    vertexColors: true, map: furTex('boar', '#332b24', 22), roughness: 0.9, metalness: 0,
+  }),
+  wolf: new THREE.MeshStandardMaterial({
+    vertexColors: true, map: furTex('wolf', '#6b6660', 33), roughness: 0.92, metalness: 0,
+  }),
+  fish: new THREE.MeshStandardMaterial({
+    vertexColors: true, map: scaleTex(), roughness: 0.28, metalness: 0.45,
+    side: THREE.DoubleSide,
+  }),
+};
+const MAT_HORN = new THREE.MeshStandardMaterial({
+  vertexColors: true, roughness: 0.45, metalness: 0.1,
+});
 const MAT_EYE = new THREE.MeshBasicMaterial({ color: 0xff2200 });
+const MAT_EYE_WOLF = new THREE.MeshBasicMaterial({ color: 0xffd020 });
+const MAT_EYE_FISH = new THREE.MeshBasicMaterial({ color: 0xfff0a0 });
+
+export function applyAnimalEnv(env) {
+  for (const m of [...Object.values(MAT_FUR), MAT_HORN]) {
+    m.envMap = env;
+    m.envMapIntensity = m === MAT_FUR.fish ? 1.2 : 0.5;
+    m.needsUpdate = true;
+  }
+}
 
 function paint(geo, hex, jitter = 0) {
   const c = new THREE.Color(hex);
@@ -22,61 +54,77 @@ function paint(geo, hex, jitter = 0) {
 }
 
 const box = (w, h, d, x, y, z, col, jit) => {
-  const g = new THREE.BoxGeometry(w, h, d);
+  const g = new THREE.BoxGeometry(w, h, d, 2, 2, 2);
   g.translate(x, y, z);
   return paint(g, col, jit);
 };
 const sph = (r, x, y, z, col, sx = 1, sy = 1, sz = 1, jit = 0) => {
-  const g = new THREE.SphereGeometry(r, 8, 6);
+  const g = new THREE.SphereGeometry(r, 14, 10);
   g.scale(sx, sy, sz);
   g.translate(x, y, z);
   return paint(g, col, jit);
 };
 
+/** Лапа из двух сегментов со стопой — прямая коробка читается как ходуля. */
+function limb(len, rTop, rBot, col) {
+  const p = [];
+  const upper = new THREE.CylinderGeometry(rTop, rBot * 1.05, len * 0.55, 8);
+  upper.translate(0, -len * 0.275, 0);
+  p.push(paint(upper, col, 0.1));
+  const lower = new THREE.CylinderGeometry(rBot * 1.05, rBot * 0.8, len * 0.5, 8);
+  lower.translate(0, -len * 0.78, 0.02);
+  p.push(paint(lower, col, 0.1));
+  const paw = new THREE.SphereGeometry(rBot * 1.25, 10, 7);
+  paw.scale(1, 0.55, 1.35);
+  paw.translate(0, -len * 1.0, 0.03);
+  p.push(paint(paw, 0x1c1610, 0.08));
+  return mergeParts(p);
+}
+
 /* ============================================================
-   МОДЕЛИ
-   Ориентация: «вперёд» у всех зверей — это -Z.
+   МОДЕЛИ. Ориентация: «вперёд» у всех зверей — это -Z.
    ============================================================ */
 
 function buildBear() {
   const g = new THREE.Group();
-  const fur = 0x4a3122, fur2 = 0x3a251a;
+  const fur = 0xffffff, fur2 = 0xd8d0c4;
   const body = [];
-  // корпус
-  body.push(sph(0.62, 0, 0, 0.15, fur, 1.05, 0.98, 1.65, 0.16));
-  // горб на загривке — узнаваемая черта
-  body.push(sph(0.42, 0, 0.3, -0.45, fur2, 1.0, 0.85, 0.95, 0.14));
-  body.push(sph(0.3, 0, -0.05, 0.95, fur, 1.0, 0.9, 0.9, 0.1));
-  const bodyMesh = new THREE.Mesh(mergeParts(body), MAT_ANIMAL);
-  bodyMesh.position.y = 0.92;
+  body.push(sph(0.6, 0, 0, 0.2, fur, 1.08, 1.0, 1.62, 0.1));
+  body.push(sph(0.46, 0, 0.26, -0.42, fur2, 1.02, 0.9, 1.0, 0.1));    // горб
+  body.push(sph(0.34, 0, -0.06, 0.98, fur, 1.0, 0.92, 0.95, 0.08));   // круп
+  body.push(sph(0.1, 0, 0.12, 1.24, fur2, 1, 1, 1.4));                // хвостик
+  const bodyMesh = new THREE.Mesh(mergeParts(body), MAT_FUR.bear);
+  bodyMesh.position.y = 0.94;
+  bodyMesh.castShadow = true;
   g.add(bodyMesh);
 
-  // голова
   const head = new THREE.Group();
   const hp = [];
-  hp.push(sph(0.31, 0, 0, 0, fur2, 1.0, 0.95, 1.05, 0.1));
-  hp.push(sph(0.17, 0, -0.08, -0.32, 0x2a1c12, 0.9, 0.8, 1.25, 0.1));   // морда
-  hp.push(sph(0.055, 0, -0.03, -0.52, 0x120c08));                        // нос
-  hp.push(sph(0.11, -0.24, 0.24, 0.06, fur2, 1, 1, 0.55));               // уши
-  hp.push(sph(0.11, 0.24, 0.24, 0.06, fur2, 1, 1, 0.55));
-  head.add(new THREE.Mesh(mergeParts(hp), MAT_ANIMAL));
-  const e1 = new THREE.Mesh(new THREE.SphereGeometry(0.042, 6, 4), MAT_EYE);
-  e1.position.set(-0.13, 0.07, -0.26);
-  const e2 = e1.clone(); e2.position.x = 0.13;
-  head.add(e1, e2);
-  head.position.set(0, 1.18, -0.92);
+  hp.push(sph(0.32, 0, 0, 0, fur2, 1.0, 0.96, 1.06, 0.08));
+  hp.push(sph(0.185, 0, -0.09, -0.3, 0xa89684, 0.92, 0.82, 1.3, 0.08));   // морда
+  hp.push(sph(0.062, 0, -0.05, -0.55, 0x2a2018));                          // мочка носа
+  for (const sx of [-1, 1]) {
+    hp.push(sph(0.115, sx * 0.235, 0.245, 0.05, fur2, 1, 1, 0.5));         // уши
+    hp.push(sph(0.075, sx * 0.235, 0.245, 0.02, 0xb09a86, 1, 1, 0.4));
+  }
+  const headMesh = new THREE.Mesh(mergeParts(hp), MAT_FUR.bear);
+  headMesh.castShadow = true;
+  head.add(headMesh);
+  for (const sx of [-1, 1]) {
+    const e = new THREE.Mesh(new THREE.SphereGeometry(0.04, 8, 6), MAT_EYE);
+    e.position.set(sx * 0.135, 0.075, -0.255);
+    head.add(e);
+  }
+  head.position.set(0, 1.2, -0.94);
   g.add(head);
 
-  // лапы
   const legs = [];
-  for (const [lx, lz] of [[-0.38, -0.5], [0.38, -0.5], [-0.36, 0.62], [0.36, 0.62]]) {
+  for (const [lx, lz] of [[-0.4, -0.5], [0.4, -0.5], [-0.38, 0.66], [0.38, 0.66]]) {
     const lg = new THREE.Group();
-    const parts = [
-      box(0.26, 0.72, 0.3, 0, -0.36, 0, fur2, 0.12),
-      sph(0.17, 0, -0.72, -0.04, 0x1c1208, 1.1, 0.6, 1.3),
-    ];
-    lg.add(new THREE.Mesh(mergeParts(parts), MAT_ANIMAL));
-    lg.position.set(lx, 0.86, lz);
+    const m = new THREE.Mesh(limb(0.86, 0.16, 0.125, fur2), MAT_FUR.bear);
+    m.castShadow = true;
+    lg.add(m);
+    lg.position.set(lx, 0.92, lz);
     g.add(lg);
     legs.push(lg);
   }
@@ -85,48 +133,61 @@ function buildBear() {
 
 function buildBoar() {
   const g = new THREE.Group();
-  const hide = 0x2e2620, hide2 = 0x1f1a16;
+  const hide = 0xffffff, hide2 = 0xc8bcb0;
   const body = [];
-  body.push(sph(0.44, 0, 0, 0.1, hide, 1.0, 1.0, 1.5, 0.18));
-  body.push(sph(0.3, 0, 0.12, -0.42, hide2, 1.0, 0.9, 0.9, 0.14));
-  // щетина на хребте
-  for (let i = 0; i < 7; i++) {
-    const c = new THREE.ConeGeometry(0.04, 0.26, 4);
-    c.rotateX(-0.5);
-    c.translate(0, 0.46 - i * 0.012, -0.5 + i * 0.16);
-    body.push(paint(c, 0x4a4038, 0.2));
+  body.push(sph(0.42, 0, 0, 0.14, hide, 1.02, 1.02, 1.5, 0.12));
+  body.push(sph(0.34, 0, 0.14, -0.4, hide2, 1.0, 0.92, 0.95, 0.1));
+  body.push(sph(0.22, 0, -0.02, 0.8, hide, 1, 0.9, 0.9, 0.1));
+  for (let i = 0; i < 9; i++) {                                    // щетина на хребте
+    const c = new THREE.ConeGeometry(0.035, 0.3, 5);
+    c.rotateX(-0.55);
+    c.translate(0, 0.44 - i * 0.008, -0.55 + i * 0.15);
+    body.push(paint(c, 0xe8dcd0, 0.2));
   }
-  const bodyMesh = new THREE.Mesh(mergeParts(body), MAT_ANIMAL);
-  bodyMesh.position.y = 0.62;
+  const bodyMesh = new THREE.Mesh(mergeParts(body), MAT_FUR.boar);
+  bodyMesh.position.y = 0.64;
+  bodyMesh.castShadow = true;
   g.add(bodyMesh);
 
   const head = new THREE.Group();
   const hp = [];
-  hp.push(sph(0.26, 0, 0, -0.1, hide2, 0.92, 0.95, 1.3, 0.1));
-  hp.push(sph(0.14, 0, -0.06, -0.42, 0x3a3028, 0.85, 0.72, 1.0));      // рыло
-  hp.push(sph(0.09, -0.16, 0.2, 0.02, hide2, 0.7, 1.2, 0.4));          // уши
-  hp.push(sph(0.09, 0.16, 0.2, 0.02, hide2, 0.7, 1.2, 0.4));
-  // клыки
-  for (const s of [-1, 1]) {
-    const t = new THREE.ConeGeometry(0.035, 0.26, 5);
-    t.rotateX(-2.5);
-    t.rotateZ(s * 0.3);
-    t.translate(s * 0.1, -0.05, -0.46);
-    hp.push(paint(t, 0xe8e2d0));
+  hp.push(sph(0.28, 0, 0, -0.08, hide2, 0.94, 0.96, 1.3, 0.08));
+  hp.push(sph(0.155, 0, -0.07, -0.44, 0xd8c8bc, 0.88, 0.76, 1.05));   // рыло
+  hp.push(sph(0.05, 0, -0.07, -0.56, 0x3a2e26, 1, 0.7, 0.5));         // пятак
+  for (const sx of [-1, 1]) {
+    const ear = new THREE.ConeGeometry(0.075, 0.19, 6);
+    ear.rotateX(-0.35);
+    ear.translate(sx * 0.17, 0.25, 0.02);
+    hp.push(paint(ear, hide2, 0.1));
   }
-  head.add(new THREE.Mesh(mergeParts(hp), MAT_ANIMAL));
-  const e1 = new THREE.Mesh(new THREE.SphereGeometry(0.032, 6, 4), MAT_EYE);
-  e1.position.set(-0.12, 0.06, -0.28);
-  const e2 = e1.clone(); e2.position.x = 0.12;
-  head.add(e1, e2);
-  head.position.set(0, 0.76, -0.58);
+  const headMesh = new THREE.Mesh(mergeParts(hp), MAT_FUR.boar);
+  headMesh.castShadow = true;
+  head.add(headMesh);
+
+  const tusks = [];
+  for (const sx of [-1, 1]) {
+    const t = new THREE.CylinderGeometry(0.012, 0.03, 0.28, 7);
+    t.rotateX(-2.45);
+    t.rotateZ(sx * 0.28);
+    t.translate(sx * 0.105, -0.04, -0.47);
+    tusks.push(paint(t, 0xf0e8d4));
+  }
+  head.add(new THREE.Mesh(mergeParts(tusks), MAT_HORN));
+  for (const sx of [-1, 1]) {
+    const e = new THREE.Mesh(new THREE.SphereGeometry(0.031, 8, 6), MAT_EYE);
+    e.position.set(sx * 0.13, 0.07, -0.27);
+    head.add(e);
+  }
+  head.position.set(0, 0.78, -0.58);
   g.add(head);
 
   const legs = [];
-  for (const [lx, lz] of [[-0.24, -0.34], [0.24, -0.34], [-0.22, 0.44], [0.22, 0.44]]) {
+  for (const [lx, lz] of [[-0.25, -0.34], [0.25, -0.34], [-0.23, 0.46], [0.23, 0.46]]) {
     const lg = new THREE.Group();
-    lg.add(new THREE.Mesh(box(0.15, 0.52, 0.16, 0, -0.26, 0, hide2, 0.12), MAT_ANIMAL));
-    lg.position.set(lx, 0.56, lz);
+    const m = new THREE.Mesh(limb(0.58, 0.085, 0.06, hide2), MAT_FUR.boar);
+    m.castShadow = true;
+    lg.add(m);
+    lg.position.set(lx, 0.6, lz);
     g.add(lg);
     legs.push(lg);
   }
@@ -135,42 +196,49 @@ function buildBoar() {
 
 function buildWolf() {
   const g = new THREE.Group();
-  const fur = 0x6b6660, fur2 = 0x4e4a45;
+  const fur = 0xffffff, fur2 = 0xd0cac2;
   const body = [];
-  body.push(sph(0.3, 0, 0, 0.05, fur, 1.0, 0.95, 1.7, 0.16));
-  body.push(sph(0.24, 0, 0.08, -0.38, fur2, 1.0, 0.9, 0.9, 0.12));
-  // хвост
-  const tail = new THREE.CylinderGeometry(0.09, 0.04, 0.6, 5);
-  tail.rotateX(1.1);
-  tail.translate(0, 0.12, 0.62);
-  body.push(paint(tail, fur2, 0.18));
-  const bodyMesh = new THREE.Mesh(mergeParts(body), MAT_ANIMAL);
-  bodyMesh.position.y = 0.7;
+  body.push(sph(0.29, 0, 0, 0.06, fur, 1.02, 0.96, 1.72, 0.1));
+  body.push(sph(0.26, 0, 0.09, -0.4, fur2, 1.0, 0.94, 0.9, 0.1));
+  body.push(sph(0.2, 0, 0.02, 0.52, fur, 1, 0.92, 0.9, 0.1));
+  const tail = new THREE.CylinderGeometry(0.1, 0.035, 0.66, 8);
+  tail.rotateX(1.15);
+  tail.translate(0, 0.14, 0.66);
+  body.push(paint(tail, 0xb8b2aa, 0.15));
+  const bodyMesh = new THREE.Mesh(mergeParts(body), MAT_FUR.wolf);
+  bodyMesh.position.y = 0.72;
+  bodyMesh.castShadow = true;
   g.add(bodyMesh);
 
   const head = new THREE.Group();
   const hp = [];
-  hp.push(sph(0.19, 0, 0, -0.06, fur2, 0.95, 0.95, 1.15, 0.1));
-  hp.push(sph(0.1, 0, -0.05, -0.3, 0x3a3632, 0.8, 0.7, 1.3));
-  hp.push(sph(0.045, 0, -0.03, -0.46, 0x141210));
-  for (const s of [-1, 1]) {
-    const ear = new THREE.ConeGeometry(0.075, 0.2, 4);
-    ear.translate(s * 0.11, 0.22, 0.02);
+  hp.push(sph(0.2, 0, 0, -0.04, fur2, 0.96, 0.96, 1.12, 0.08));
+  hp.push(sph(0.105, 0, -0.055, -0.28, 0xb0a89e, 0.84, 0.74, 1.35));
+  hp.push(sph(0.042, 0, -0.045, -0.44, 0x1a1614));
+  for (const sx of [-1, 1]) {
+    const ear = new THREE.ConeGeometry(0.07, 0.21, 5);
+    ear.rotateX(-0.12);
+    ear.translate(sx * 0.115, 0.235, 0.02);
     hp.push(paint(ear, fur2, 0.1));
   }
-  head.add(new THREE.Mesh(mergeParts(hp), MAT_ANIMAL));
-  const e1 = new THREE.Mesh(new THREE.SphereGeometry(0.028, 6, 4), new THREE.MeshBasicMaterial({ color: 0xffd020 }));
-  e1.position.set(-0.09, 0.05, -0.22);
-  const e2 = e1.clone(); e2.position.x = 0.09;
-  head.add(e1, e2);
-  head.position.set(0, 0.82, -0.5);
+  const headMesh = new THREE.Mesh(mergeParts(hp), MAT_FUR.wolf);
+  headMesh.castShadow = true;
+  head.add(headMesh);
+  for (const sx of [-1, 1]) {
+    const e = new THREE.Mesh(new THREE.SphereGeometry(0.027, 8, 6), MAT_EYE_WOLF);
+    e.position.set(sx * 0.093, 0.055, -0.215);
+    head.add(e);
+  }
+  head.position.set(0, 0.84, -0.5);
   g.add(head);
 
   const legs = [];
-  for (const [lx, lz] of [[-0.16, -0.26], [0.16, -0.26], [-0.15, 0.34], [0.15, 0.34]]) {
+  for (const [lx, lz] of [[-0.17, -0.26], [0.17, -0.26], [-0.16, 0.36], [0.16, 0.36]]) {
     const lg = new THREE.Group();
-    lg.add(new THREE.Mesh(box(0.1, 0.6, 0.11, 0, -0.3, 0, fur2, 0.12), MAT_ANIMAL));
-    lg.position.set(lx, 0.66, lz);
+    const m = new THREE.Mesh(limb(0.64, 0.058, 0.042, fur2), MAT_FUR.wolf);
+    m.castShadow = true;
+    lg.add(m);
+    lg.position.set(lx, 0.68, lz);
     g.add(lg);
     legs.push(lg);
   }
@@ -178,54 +246,75 @@ function buildWolf() {
 }
 
 function buildHarius() {
-  // ХАРИУС. Огромный парусный плавник — как в жизни, только злее.
+  // ХАРИУС. Парусный спинной плавник как в жизни, только злее.
   const g = new THREE.Group();
-  const silver = 0xa8b4bc, dark = 0x4a5a66;
   const body = [];
-  body.push(sph(0.3, 0, 0, 0, silver, 0.62, 0.95, 1.9, 0.1));
-  body.push(sph(0.16, 0, 0.02, -0.46, dark, 0.72, 0.9, 1.0, 0.08));      // голова
+  // тело каплей: сплюснуто с боков, сужается к хвосту
+  const bg = new THREE.SphereGeometry(0.3, 18, 12);
+  const bp = bg.attributes.position;
+  for (let i = 0; i < bp.count; i++) {
+    const z = bp.getZ(i) / 0.3;
+    const k = 1 - Math.max(0, z) * 0.62;
+    bp.setX(i, bp.getX(i) * 0.5 * k);
+    bp.setY(i, bp.getY(i) * 0.98 * k);
+    bp.setZ(i, bp.getZ(i) * 1.95);
+  }
+  bg.computeVertexNormals();
+  body.push(paint(bg, 0xf0f4f8, 0.05));
+  body.push(sph(0.15, 0, 0.02, -0.5, 0xb8c4cc, 0.62, 0.86, 0.9, 0.05));   // голова
+
   // раскрытая пасть
-  const jawG = new THREE.ConeGeometry(0.13, 0.2, 6);
-  jawG.rotateX(-Math.PI / 2);
-  jawG.translate(0, -0.03, -0.62);
-  body.push(paint(jawG, 0xb04a52));
-  // парус-плавник с фиолетовым крапом
-  const fin = new THREE.PlaneGeometry(0.78, 0.44, 4, 2);
+  const jaw = new THREE.ConeGeometry(0.125, 0.22, 8);
+  jaw.rotateX(-Math.PI / 2);
+  jaw.translate(0, -0.035, -0.64);
+  body.push(paint(jaw, 0xc85a62));
+
+  // парус
+  const fin = new THREE.PlaneGeometry(0.86, 0.5, 8, 3);
   const fp = fin.attributes.position;
   for (let i = 0; i < fp.count; i++) {
-    const t = (fp.getX(i) + 0.39) / 0.78;
-    fp.setY(i, fp.getY(i) * (0.55 + Math.sin(t * Math.PI) * 0.85));
+    const t = (fp.getX(i) + 0.43) / 0.86;
+    fp.setY(i, fp.getY(i) * (0.5 + Math.sin(t * Math.PI) * 1.0));
+    fp.setZ(i, Math.sin(t * 9) * 0.012);        // складки паруса
   }
+  fin.computeVertexNormals();
   fin.rotateY(Math.PI / 2);
-  fin.translate(0, 0.42, -0.02);
-  body.push(paint(fin, 0x7a4a9c, 0.3));
-  // хвост
-  const tail = new THREE.PlaneGeometry(0.34, 0.42);
-  tail.rotateY(Math.PI / 2);
-  tail.translate(0, 0.02, 0.52);
-  body.push(paint(tail, dark, 0.2));
-  // брюшные плавники
-  for (const s of [-1, 1]) {
-    const pf = new THREE.PlaneGeometry(0.24, 0.16);
-    pf.rotateX(Math.PI / 2 + s * 0.5);
-    pf.translate(s * 0.16, -0.1, -0.2);
-    body.push(paint(pf, 0x8a96a0, 0.2));
+  fin.translate(0, 0.46, 0.0);
+  body.push(paint(fin, 0x9a68c0, 0.22));
+
+  const tail = new THREE.PlaneGeometry(0.4, 0.46, 3, 3);
+  const tp = tail.attributes.position;
+  for (let i = 0; i < tp.count; i++) {
+    const t = (tp.getX(i) + 0.2) / 0.4;
+    tp.setY(i, tp.getY(i) * (0.4 + t * 1.3));   // хвост-вилка
   }
-  const bodyMesh = new THREE.Mesh(mergeParts(body), MAT_ANIMAL);
-  bodyMesh.material = new THREE.MeshLambertMaterial({
-    vertexColors: true, side: THREE.DoubleSide, emissive: 0x101820,
-  });
-  bodyMesh.position.y = 0.32;          // лежит на брюхе, а не утоплен в землю
+  tail.computeVertexNormals();
+  tail.rotateY(Math.PI / 2);
+  tail.translate(0, 0.02, 0.62);
+  body.push(paint(tail, 0x7a90a0, 0.18));
+
+  for (const sx of [-1, 1]) {
+    const pf = new THREE.PlaneGeometry(0.26, 0.17);
+    pf.rotateX(Math.PI / 2 + sx * 0.55);
+    pf.rotateY(sx * 0.3);
+    pf.translate(sx * 0.14, -0.08, -0.22);
+    body.push(paint(pf, 0xa8b4be, 0.18));
+  }
+
+  const bodyMesh = new THREE.Mesh(mergeParts(body), MAT_FUR.fish);
+  bodyMesh.position.y = 0.32;
+  bodyMesh.castShadow = true;
   g.add(bodyMesh);
 
   const head = new THREE.Group();
-  const e1 = new THREE.Mesh(new THREE.SphereGeometry(0.06, 7, 5), new THREE.MeshBasicMaterial({ color: 0xfff0a0 }));
-  e1.position.set(-0.1, 0.38, -0.44);
-  const e2 = e1.clone(); e2.position.x = 0.1;
-  const p1 = new THREE.Mesh(new THREE.SphereGeometry(0.03, 6, 4), new THREE.MeshBasicMaterial({ color: 0x000000 }));
-  p1.position.set(-0.13, 0.38, -0.46);
-  const p2 = p1.clone(); p2.position.x = 0.13;
-  head.add(e1, e2, p1, p2);
+  for (const sx of [-1, 1]) {
+    const e = new THREE.Mesh(new THREE.SphereGeometry(0.062, 10, 8), MAT_EYE_FISH);
+    e.position.set(sx * 0.1, 0.38, -0.46);
+    const pu = new THREE.Mesh(new THREE.SphereGeometry(0.032, 8, 6),
+      new THREE.MeshBasicMaterial({ color: 0x000000 }));
+    pu.position.set(sx * 0.128, 0.38, -0.48);
+    head.add(e, pu);
+  }
   g.add(head);
 
   return { g, head, legs: [], bodyMesh };
@@ -239,21 +328,21 @@ export const KINDS = {
     name: 'МЕДВЕДЬ', build: buildBear, hp: 330, scale: 1.0,
     approach: 4.6, chargeSpeed: 15.6, telegraph: 1.3, chargeTime: 1.55,
     recover: 1.5, radius: 0.95, maxCharges: 4, instakill: true, damage: 999,
-    lockDist: 6.2, chargeTurn: 1.9, engageRange: 17, sound: 'bear', headY: 1.2, bonus: CONFIG.killBonusBear,
+    lockDist: 11.0, chargeTurn: 1.9, engageRange: 17, sound: 'bear', headY: 1.2, bonus: CONFIG.killBonusBear,
     corrida: true, aggroMusic: 1.0,
   },
   boar: {
     name: 'КАБАН', build: buildBoar, hp: 150, scale: 1.0,
     approach: 5.4, chargeSpeed: 14.2, telegraph: 0.85, chargeTime: 1.3,
     recover: 1.1, radius: 0.7, maxCharges: 5, instakill: false, damage: 58,
-    lockDist: 5.2, chargeTurn: 2.4, engageRange: 14, sound: 'boar', headY: 0.8, bonus: CONFIG.killBonusBoar,
+    lockDist: 9.0, chargeTurn: 2.4, engageRange: 14, sound: 'boar', headY: 0.8, bonus: CONFIG.killBonusBoar,
     corrida: true, aggroMusic: 0.7,
   },
   wolf: {
     name: 'ВОЛК', build: buildWolf, hp: 90, scale: 1.0,
     approach: 6.6, chargeSpeed: 11.2, telegraph: 0.5, chargeTime: 0.8,
     recover: 0.7, radius: 0.55, maxCharges: 99, instakill: false, damage: 17,
-    lockDist: 3.8, chargeTurn: 3.4, engageRange: 22, sound: 'wolf', headY: 0.85, bonus: CONFIG.killBonusWolf,
+    lockDist: 6.5, chargeTurn: 3.4, engageRange: 22, sound: 'wolf', headY: 0.85, bonus: CONFIG.killBonusWolf,
     corrida: true, circles: true, aggroMusic: 0.55,
   },
   harius: {
@@ -370,7 +459,7 @@ class Animal {
           target = toPlayer + this.circleSide * 1.0;
         }
         this.dir = angleTo(this.dir, target, dt * 3.2);
-        moveSpeed = this.k.approach;
+        moveSpeed = this.k.approach * mgr.aggroScale;
         if (dist < (this.k.jumper ? 12 : this.k.circles ? 9 : this.k.engageRange * 0.62)) {
           this.state = 'telegraph';
           this.t = 0;
@@ -424,7 +513,7 @@ class Animal {
           this.jumpV -= 13 * dt;
           this.jumpY = Math.max(0, this.jumpY + this.jumpV * dt);
         }
-        if (player.dodging) this.playerDodged = true;   // ушёл рывком, а не пешком
+        if (player.evading) this.playerDodged = true;   // ушёл рывком, а не пешком
         // проверка попадания
         if (!this.hitThisCharge) {
           const [hx, hz] = this.hitPoint();
@@ -544,6 +633,7 @@ export class AnimalManager {
     scene.add(this.root);
     this.list = [];
     this.blood = [];
+    this.aggroScale = 1;      // плащ-дождевик: звери сближаются медленнее
   }
 
   spawn(kindId, x, z) {

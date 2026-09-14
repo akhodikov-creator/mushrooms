@@ -49,10 +49,10 @@ export const CONFIG = {
   maxStamina: 100,
   staminaDrain: 13,
   staminaRegen: 11,
-  dodgeCost: 28,
+  dodgeCost: 12,
   dodgeSpeed: 18.5,
   dodgeTime: 0.32,
-  dodgeCooldown: 0.85,
+  dodgeCooldown: 0.7,
   pickRange: 3.1,
   interactRange: 5.0,
 
@@ -65,6 +65,19 @@ export const CONFIG = {
   killBonusBoar: 600,
   killBonusWolf: 340,
   killBonusHarius: 900,
+
+  // --- уровень охотника (только внутри забега) ---
+  xpBear: 100,
+  xpBoar: 45,
+  xpWolf: 28,
+  xpHarius: 55,
+  xpOle: 15,                // только за первый уворот от каждого зверя
+  xpPerLevel: 60,           // порог первого уровня
+  xpLevelGrowth: 1.45,      // каждый следующий дороже
+  levelSpeed: 0.05,         // +5% скорости за уровень
+  levelStamina: 8,          // +выносливость
+  levelPickRange: 0.18,     // +радиус сбора
+  maxLevel: 12,
 
   // --- плотность ---
   mushroomsPerChunk: 62,
