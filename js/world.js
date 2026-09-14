@@ -3,7 +3,7 @@ import { mergeParts } from './geo.js';
 import { CONFIG } from './config.js';
 import {
   WS, TAU, rng, terrainHeight, terrainSlope, moisture, isWater, WATER_LEVEL,
-  wrapDelta, wrapCoord, clamp, lerp,
+  wrapDelta, wrapCoord, clamp, lerp, dampTo,
 } from './utils.js';
 import {
   generateChunkMushrooms, getMushroomGeometry,
@@ -762,6 +762,72 @@ export class World {
     this._buildSky();
     this._buildMidges();
     this._buildNearGrass();
+    this._buildRain();
+
+    // погода: 0 — ясно, 1 — стена воды
+    this.weather = 'clear';
+    this.wet = 0;
+    this.fogBoost = 0;
+    this.windBoost = 0;
+  }
+
+  /* ------------------------------------------------------------
+     Дождь. Столб капель едет за игроком: рисовать его на весь
+     километр бессмысленно, дальше 25 м капли всё равно не видно.
+     ------------------------------------------------------------ */
+  _buildRain() {
+    const n = CONFIG.quality === 'low' ? 900 : 2600;
+    const g = new THREE.BufferGeometry();
+    const p = new Float32Array(n * 3);
+    const spd = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      p[i * 3] = (Math.random() - 0.5) * 46;
+      p[i * 3 + 1] = Math.random() * 22;
+      p[i * 3 + 2] = (Math.random() - 0.5) * 46;
+      spd[i] = 14 + Math.random() * 12;
+    }
+    g.setAttribute('position', new THREE.BufferAttribute(p, 3));
+    this.rainSpeed = spd;
+    this.rain = new THREE.Points(g, new THREE.PointsMaterial({
+      color: 0xa8c4d8, size: 0.075, transparent: true, opacity: 0,
+      depthWrite: false, sizeAttenuation: true, fog: false,
+    }));
+    this.rain.frustumCulled = false;
+    this.rain.visible = false;
+    this.scene.add(this.rain);
+  }
+
+  /** Меняет погоду. Возвращает подпись для интерфейса. */
+  setWeather(kind) {
+    this.weather = kind;
+    return {
+      clear: '', rain: '☂ дождь', fog: '🌫 туман', wind: '🍃 ветер',
+    }[kind] || '';
+  }
+
+  _updateWeather(dt, px, pz) {
+    const targetWet = this.weather === 'rain' ? 1 : 0;
+    const targetFog = this.weather === 'fog' ? 1 : this.weather === 'rain' ? 0.45 : 0;
+    const targetWind = this.weather === 'wind' ? 1 : this.weather === 'rain' ? 0.5 : 0;
+    this.wet = dampTo(this.wet, targetWet, 0.6, dt);
+    this.fogBoost = dampTo(this.fogBoost, targetFog, 0.5, dt);
+    this.windBoost = dampTo(this.windBoost, targetWind, 0.7, dt);
+
+    this.rain.visible = this.wet > 0.02;
+    if (this.rain.visible) {
+      this.rain.material.opacity = this.wet * 0.55;
+      const pos = this.rain.geometry.attributes.position;
+      const drift = this.windBoost * 6;
+      for (let i = 0; i < this.rainSpeed.length; i++) {
+        let y = pos.getY(i) - this.rainSpeed[i] * dt;
+        let x = pos.getX(i) + drift * dt;
+        if (y < -3) { y = 20 + Math.random() * 4; x = (Math.random() - 0.5) * 46; }
+        if (x > 23) x -= 46;
+        pos.setXYZ(i, x, y, pos.getZ(i));
+      }
+      pos.needsUpdate = true;
+      this.rain.position.set(px, terrainHeight(px, pz), pz);
+    }
   }
 
   /* ------------------------------------------------------------
@@ -929,15 +995,23 @@ export class World {
 
     const fogDay = new THREE.Color(0xa8b8a0), fogDusk = new THREE.Color(0x4a4258);
     scene.fog.color.copy(fogDay).lerp(fogDusk, dl);
-    scene.fog.near = CONFIG.fogNear - dl * 18;
-    scene.fog.far = CONFIG.fogFar - dl * 75;
+    // в дождь и туман видно заметно хуже
+    const wf = (this.fogBoost || 0);
+    scene.fog.near = (CONFIG.fogNear - dl * 18) * (1 - wf * 0.7);
+    scene.fog.far = (CONFIG.fogFar - dl * 75) * (1 - wf * 0.62);
+    if (wf > 0.01) {
+      const grey = new THREE.Color(0x9aa8b0);
+      scene.fog.color.lerp(grey, wf * 0.6);
+      this.sun.intensity *= 1 - wf * 0.55;
+      this.hemi.intensity *= 1 - wf * 0.2;
+    }
     this.dusk = dl;
   }
 
   /** Перекладывает чанки и пункты вокруг игрока (зацикливание мира). */
   update(px, pz, dt, dayT, camera) {
     this.time += dt;
-    windUniform.value = this.time;
+    windUniform.value = this.time * (1 + (this.windBoost || 0) * 1.6);
 
     const viewR = CONFIG.viewChunks;
 
@@ -966,6 +1040,7 @@ export class World {
       }
     }
 
+    this._updateWeather(dt, px, pz);
     this._updateNearGrass(px, pz);
 
     // мошкара следует за игроком
@@ -1040,7 +1115,8 @@ export class World {
 
   pick(m) {
     m.picked = true;
-    m.respawn = 34 + Math.random() * 46;
+    // в дождь грибы лезут заметно бодрее
+    m.respawn = (34 + Math.random() * 46) * (1 - (this.wet || 0) * 0.45);
     m.mesh.scale.setScalar(0.0001);
     if (m.light) m.light.visible = false;
   }

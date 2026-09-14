@@ -250,6 +250,47 @@ export const capTex = () => make('cap', 256, 256, (g, w, h) => {
   }
 });
 
+/* ---------------- кожа руки и ткань рукава ---------------- */
+export const skinTex = () => make('skin', 128, 128, (g, w, h) => {
+  g.fillStyle = '#c98d68';
+  g.fillRect(0, 0, w, h);
+  const r = rng(4711);
+  // неровный тон и поры, иначе кисть выглядит пластмассовой
+  for (let i = 0; i < 900; i++) {
+    const x = r() * w, y = r() * h;
+    g.fillStyle = r() < 0.5
+      ? `rgba(168,104,74,${r() * 0.16})`
+      : `rgba(240,196,164,${r() * 0.14})`;
+    g.beginPath(); g.arc(x, y, 1 + r() * 9, 0, 6.28); g.fill();
+  }
+  for (let i = 0; i < 26; i++) {           // складки на костяшках
+    const y = r() * h;
+    g.strokeStyle = `rgba(140,84,58,${0.05 + r() * 0.13})`;
+    g.lineWidth = 0.8 + r() * 1.4;
+    g.beginPath();
+    g.moveTo(0, y);
+    for (let x = 0; x <= w; x += 16) g.lineTo(x, y + Math.sin(x * 0.08 + i) * 2.5);
+    g.stroke();
+  }
+});
+
+export const clothTex = () => make('cloth', 128, 128, (g, w, h) => {
+  g.fillStyle = '#4a5a38';
+  g.fillRect(0, 0, w, h);
+  const r = rng(1212);
+  for (let i = 0; i < 3000; i++) {         // плетение брезента
+    const x = r() * w, y = r() * h;
+    g.fillStyle = r() < 0.5 ? `rgba(0,0,0,${r() * 0.2})` : `rgba(200,210,180,${r() * 0.12})`;
+    g.fillRect(x, y, 1 + r() * 3, 1 + r() * 2);
+  }
+  for (let i = 0; i < 40; i++) {
+    const y = (i / 40) * h;
+    g.strokeStyle = `rgba(0,0,0,${0.05 + r() * 0.08})`;
+    g.lineWidth = 1;
+    g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke();
+  }
+});
+
 /* ---------------- металл ---------------- */
 export const metalTex = () => make('metal', 256, 256, (g, w, h) => {
   g.fillStyle = '#8f949c';

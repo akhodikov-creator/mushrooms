@@ -13,7 +13,8 @@ export class Inventory {
     this.comboT = 0;
     this.streak = 0;
     this.bestStreak = 0;
-    this.counts = Object.create(null);
+    this.counts = Object.create(null);   // за весь день
+    this.bag = Object.create(null);      // что лежит в таре сейчас
     this.poisonTaken = 0;
     this.totalPicked = 0;
     this.oles = 0;
@@ -52,6 +53,27 @@ export class Inventory {
   get pickRangeBonus() { return (this.level - 1) * CONFIG.levelPickRange; }
 
   get container() { return CONTAINERS[this.tier]; }
+
+  /**
+   * Насколько тара мешает идти: 0 — не мешает, 1 — не сдвинуться.
+   * Пустая крупная тара уже неудобна, полная — тем более.
+   */
+  get dragFactor() {
+    const c = this.container;
+    return c.drag * (CONFIG.dragBase + (1 - CONFIG.dragBase) * this.fillRatio);
+  }
+
+  /** Множитель скорости от веса тары. */
+  get speedPenalty() { return 1 - this.dragFactor; }
+
+  /** Насколько короче рывок с полной тарой. */
+  get dodgePenalty() { return 1 - this.dragFactor * CONFIG.dragDodge; }
+
+  /** Во сколько раз дальше слышно: вёдра гремят, лукошко и пакет — нет. */
+  get noiseFactor() {
+    const c = this.container;
+    return 1 + (c.noise - 1) * (0.5 + 0.5 * this.fillRatio);
+  }
   get cap() { return this.container.cap; }
   get full() { return this.items >= this.cap; }
   get fillRatio() { return clamp(this.items / this.cap, 0, 1); }
@@ -87,6 +109,7 @@ export class Inventory {
     }
 
     this.counts[sp.id] = (this.counts[sp.id] || 0) + 1;
+    if (!poison) this.bag[sp.id] = (this.bag[sp.id] || 0) + 1;
     this.totalPicked++;
 
     return {
@@ -104,6 +127,7 @@ export class Inventory {
     this.banked += value;
     this.carryValue = 0;
     this.items = 0;
+    this.bag = Object.create(null);
     this.deliveries++;
 
     // тара растёт, когда сдал полную (или почти полную)
@@ -122,6 +146,7 @@ export class Inventory {
     this.banked += this.carryValue;
     this.carryValue = 0;
     this.items = 0;
+    this.bag = Object.create(null);
     this.combo = 1;
     this.streak = 0;
     return lost;

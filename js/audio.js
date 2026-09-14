@@ -220,9 +220,35 @@ export const Audio = {
   },
 
   stopAmbient() {
+    this.setRain(0);
     if (!ambientNodes) return;
     try { ambientNodes.s.stop(); ambientNodes.lfo.stop(); } catch (e) { /* уже остановлено */ }
     ambientNodes = null;
+  },
+
+  /* ---------- дождь ---------- */
+  setRain(level) {
+    if (!ctx) return;
+    if (level <= 0.01) {
+      if (this.rainNodes) {
+        try { this.rainNodes.s.stop(); } catch (e) { /* уже остановлен */ }
+        this.rainNodes = null;
+      }
+      return;
+    }
+    if (!this.rainNodes) {
+      const s = ctx.createBufferSource();
+      s.buffer = noiseBuf; s.loop = true;
+      const hp = ctx.createBiquadFilter();
+      hp.type = 'highpass'; hp.frequency.value = 900;
+      const lp = ctx.createBiquadFilter();
+      lp.type = 'lowpass'; lp.frequency.value = 7000;
+      const g = ctx.createGain(); g.gain.value = 0;
+      s.connect(hp); hp.connect(lp); lp.connect(g); g.connect(master);
+      s.start();
+      this.rainNodes = { s, g };
+    }
+    this.rainNodes.g.gain.value = 0.16 * level;
   },
 
   /** Случайные птицы; зови каждый кадр. */

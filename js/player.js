@@ -26,6 +26,8 @@ export class Player {
     this.levelSpeed = 1;        // множитель от уровня охотника
     this.levelStamina = 0;
     this.staminaFree = false;   // настойка из фляжки
+    this.carrySpeed = 1;        // множитель от веса тары
+    this.carryDodge = 1;
     this.keys = Object.create(null);
     this.recoilKick = 0;
     this.hurtFlash = 0;
@@ -165,7 +167,8 @@ export class Player {
     if (moving) { const l = Math.hypot(ix, iz); ix /= l; iz /= l; }
 
     const sprinting = this.wantSprint && moving && this.stamina > 1 && !inWater;
-    let speed = (sprinting ? CONFIG.sprintSpeed : CONFIG.walkSpeed) * this.speedScale * this.levelSpeed;
+    let speed = (sprinting ? CONFIG.sprintSpeed : CONFIG.walkSpeed)
+      * this.speedScale * this.levelSpeed * this.carrySpeed;
     if (inWater) speed *= 0.52;
 
     if (sprinting && !this.staminaFree) this.stamina -= CONFIG.staminaDrain * dt;
@@ -179,7 +182,7 @@ export class Player {
     // ---- рывок ----
     if (this.dodgeT > 0) {
       this.dodgeT -= dt;
-      const k = CONFIG.dodgeSpeed * (0.35 + (this.dodgeT / CONFIG.dodgeTime) * 0.9);
+      const k = CONFIG.dodgeSpeed * this.carryDodge * (0.35 + (this.dodgeT / CONFIG.dodgeTime) * 0.9);
       wx = this.dodgeDx * k / Math.max(0.001, speed);
       wz = this.dodgeDz * k / Math.max(0.001, speed);
     }
@@ -261,6 +264,8 @@ export class Player {
     this.levelStamina = 0;
     this.speedScale = 1;
     this.staminaFree = false;
+    this.carrySpeed = 1;
+    this.carryDodge = 1;
     this.vx = this.vz = 0;
     this.dodgeT = this.dodgeCd = 0;
     this.lastDamage = 99;

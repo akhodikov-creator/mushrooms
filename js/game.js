@@ -7,6 +7,7 @@ import { Player } from './player.js';
 import { AnimalManager, KINDS, applyAnimalEnv } from './animals.js';
 import { Weapons, applyWeaponEnv } from './weapons.js';
 import { Pickups, applyPickupEnv } from './pickups.js';
+import { Body, applyBodyEnv } from './body.js';
 import { Inventory } from './inventory.js';
 import { Leaderboard } from './leaderboard.js';
 import { MAT_MUSHROOM_HL, SPECIES_BY_ID, applyMushroomEnv } from './mushrooms.js';
@@ -40,10 +41,12 @@ export class Game {
     applyAnimalEnv(env);
     applyPickupEnv(env);
     applyMushroomEnv(env);
+    applyBodyEnv(env);
     this.player = new Player(this.camera, this.canvas);
     this.animals = new AnimalManager(this.scene);
     this.weapons = new Weapons(this.camera, this.animals, this.scene);
     this.pickups = new Pickups(this.scene);
+    this.body = new Body(this.camera);
     this.inv = new Inventory();
 
     this.state = 'menu';
@@ -60,6 +63,9 @@ export class Game {
     // расписание режиссёра
     this.sched = {};
     this.effects = [];          // активные бонусы от находок
+    this.pending = [];          // звери, о которых уже предупредили
+    this.deathSeq = null;       // замедление в момент гибели
+    this.lastKiller = null;
 
     this._wireAnimals();
     this._wireInput();
@@ -99,12 +105,14 @@ export class Game {
       switch (e.code) {
         case 'KeyE': this._interact(); break;
         case 'KeyR': this.weapons.reload(); break;
-        case 'Digit1': this.weapons.select('knife'); break;
-        case 'Digit2':
+        case 'Digit1': this.weapons.select('hands'); break;
+        case 'Digit2': this.weapons.select('knife'); break;
+        case 'Digit3':
           if (!this.weapons.select('pistol') && !this.weapons.has.pistol)
             UI.toast('Пистолета нет. Может, найдётся в лесу…', 'warn');
           break;
         case 'KeyF': this._primary(); break;
+        case 'Tab': e.preventDefault(); this._toggleBag(); break;
       }
     });
 
@@ -121,9 +129,22 @@ export class Game {
   }
 
   _primary() {
-    // гриб в прицеле важнее ножа
-    if (this.aimed) { this._pick(this.aimed); return; }
+    if (this.aimed && this.weapons.canPick) { this._pick(this.aimed); return; }
+    if (this.aimed && this.weapons.armed) {
+      // руки заняты оружием — в этом и смысл выбора
+      if (this.dayT - (this._armedNag || -99) > 3) {
+        this._armedNag = this.dayT;
+        UI.toast('Руки заняты. <b>1</b> — убрать оружие', 'warn');
+        Audio.dryFire();
+      }
+      return;
+    }
     this.weapons.attack(this.player, (r) => this._onWeaponHit(r));
+  }
+
+  _toggleBag() {
+    UI.toggleBag(this.inv, SPECIES_BY_ID);
+    Audio.click();
   }
 
   _interact() {
@@ -133,7 +154,7 @@ export class Game {
     // приёмный пункт?
     const { dist } = this.world.nearestCamp(this.player.x, this.player.z);
     if (dist < 8.5) { this._deliver(); return; }
-    if (this.aimed) this._pick(this.aimed);
+    if (this.aimed && this.weapons.canPick) this._pick(this.aimed);
   }
 
   /* ============================================================
@@ -149,6 +170,17 @@ export class Game {
       }
       return;
     }
+    // эффект снимаем до того, как гриб спрячется
+    if (m.chunk) {
+      const wp = new THREE.Vector3(
+        m.chunk.group.position.x + m.mesh.position.x,
+        m.mesh.position.y,
+        m.chunk.group.position.z + m.mesh.position.z);
+      this.weapons.harvestFx(m.mesh.geometry, wp, m.mesh.rotation,
+        () => this.body.getDropPoint(new THREE.Vector3()));
+    }
+    this.weapons.playPick();
+
     this.world.pick(m);
     const r = this.inv.add(sp);
     this.bestMult = Math.max(this.bestMult, this.inv.totalMult);
@@ -242,8 +274,8 @@ export class Game {
 
       case 'boots':
         this._addEffect('boots', 'Сапоги', '🥾', 60,
-          () => { P.speedScale = 1.3; },
-          () => { P.speedScale = 1; });
+          () => { P.speedScale = 1.3; this.body.setBoots(true); },
+          () => { P.speedScale = 1; this.body.setBoots(false); });
         Audio.found();
         UI.toast('Резиновые сапоги: <b>+30% скорости</b> на минуту', 'good');
         break;
@@ -339,6 +371,7 @@ export class Game {
 
     A.onHitPlayer = (a) => {
       this.shake = 1;
+      this.lastKiller = a;
       if (a.k.instakill) {
         Audio.death();
         this.player.kill(a.k.name);
@@ -464,19 +497,19 @@ export class Game {
     if (t > CONFIG.hariusTime && t >= (S.nextHarius || CONFIG.hariusTime)) {
       S.nextHarius = t + 62 + Math.random() * 70;
       if (this.animals.count('harius') < 2) {
-        this.animals.spawnNear('harius', p.x, p.z, 16 + Math.random() * 12);
+        this._announceAnimal('harius', 16 + Math.random() * 12, 1.6);
         UI.banner('ХАРИУС', 'Рыба. Она выпрыгнула. Она бежит на тебя.', 2400, 'bad');
       }
     }
 
     // --- волки ---
     if (t > CONFIG.wolfPackTime && t >= (S.nextWolves || CONFIG.wolfPackTime)) {
-      S.nextWolves = t + 95 + Math.random() * 75;
+      S.nextWolves = t + (95 + Math.random() * 75) / this.noise;
       if (this.animals.count('wolf') === 0) {
         const n = 2 + ((Math.random() * 2) | 0);
         const base = Math.random() * Math.PI * 2;
         for (let i = 0; i < n; i++)
-          this.animals.spawnNear('wolf', p.x, p.z, 30 + Math.random() * 14, base + i * 0.4);
+          this.animals.spawnNear('wolf', p.x, p.z, (30 + Math.random() * 14) / this.noise, base + i * 0.4);
         Audio.roar('wolf');
         UI.banner('СТАЯ', `Волков ${n}. Ножом их не остановить`, 2800, 'bad');
       }
@@ -484,16 +517,39 @@ export class Game {
 
     // --- кабан по расписанию ---
     if (t > 240 && t >= (S.nextBoar || 240)) {
-      S.nextBoar = t + 110 + Math.random() * 80;
-      if (this.animals.count('boar') < 2) this.animals.spawnNear('boar', p.x, p.z, 26 + Math.random() * 12);
+      S.nextBoar = t + (110 + Math.random() * 80) / this.noise;
+      if (this.animals.count('boar') < 2) this._announceAnimal('boar', (26 + Math.random() * 12) / this.noise);
     }
 
     // --- медведь-бродяга во второй половине дня ---
     if (t > 430 && t >= (S.nextBear || 430)) {
-      S.nextBear = t + 150 + Math.random() * 110;
+      S.nextBear = t + (150 + Math.random() * 110) / this.noise;
       if (this.animals.count('bear') === 0) {
-        this.animals.spawnNear('bear', p.x, p.z, 34 + Math.random() * 10);
+        this._announceAnimal('bear', (34 + Math.random() * 10) / this.noise, 3.2);
         UI.banner('ХОЗЯИН ЛЕСА', 'Медведь вышел сам. Без мухомора.', 3000, 'bad');
+      }
+    }
+
+    // --- погода ---
+    if (t >= (S.nextWeather || 95)) {
+      const roll = Math.random();
+      // ясно чаще всего, но к вечеру портится
+      const late = t > CONFIG.dayLength * 0.55;
+      let kind = 'clear';
+      if (roll < (late ? 0.34 : 0.2)) kind = 'rain';
+      else if (roll < (late ? 0.52 : 0.34)) kind = 'fog';
+      else if (roll < (late ? 0.66 : 0.5)) kind = 'wind';
+      S.nextWeather = t + 95 + Math.random() * 80;
+      if (kind !== this.world.weather) {
+        const label = this.world.setWeather(kind);
+        UI.setWeather(label);
+        const say = {
+          rain: ['ПОШЁЛ ДОЖДЬ', 'Грибы полезут быстрее, но видно хуже'],
+          fog: ['ЛЁГ ТУМАН', 'Дальше двадцати шагов не видно ничего'],
+          wind: ['ПОДНЯЛСЯ ВЕТЕР', 'Лес шумит — зверя не услышишь'],
+          clear: ['ПРОЯСНИЛОСЬ', ''],
+        }[kind];
+        UI.banner(say[0], say[1], 2600, kind === 'clear' ? 'good' : 'info');
       }
     }
 
@@ -501,6 +557,43 @@ export class Game {
     if (this.bootsT > 0) {
       this.bootsT -= dt;
       if (this.bootsT <= 0) { p.speedScale = 1; UI.toast('Сапоги натёрли. Скорость обычная', 'info'); }
+    }
+  }
+
+  /**
+   * Зверь не выпрыгивает из ниоткуда: сперва хруст веток и далёкий
+   * голос, и только через пару секунд он появляется.
+   */
+  _announceAnimal(kind, dist, delay = 2.6) {
+    const p = this.player;
+    const ang = Math.random() * Math.PI * 2;
+    this.pending.push({
+      kind, t: delay,
+      x: p.x + Math.cos(ang) * dist,
+      z: p.z + Math.sin(ang) * dist,
+    });
+    const where = this._bearing({ x: p.x + Math.cos(ang) * dist, z: p.z + Math.sin(ang) * dist });
+    const line = {
+      bear: 'Где-то тяжело хрустнула ветка…',
+      boar: 'В кустах кто-то захрюкал…',
+      wolf: 'Далёкий вой. Не один голос.',
+      harius: 'Плеск. Громкий. Слишком громкий.',
+    }[kind] || 'В лесу что-то не так…';
+    UI.toast(`${line} <i>${where}</i>`, 'warn');
+    // приглушённый голос издалека
+    if (kind === 'wolf') Audio.roar('wolf');
+    else if (kind === 'harius') Audio.splash();
+    else Audio.noise({ dur: 0.35, gain: 0.09, type: 'bandpass', freq: 260, q: 1.4 });
+    this.shake = Math.max(this.shake, 0.16);
+  }
+
+  _updatePending(dt) {
+    for (let i = this.pending.length - 1; i >= 0; i--) {
+      const s = this.pending[i];
+      s.t -= dt;
+      if (s.t > 0) continue;
+      this.animals.spawn(s.kind, s.x, s.z);
+      this.pending.splice(i, 1);
     }
   }
 
@@ -526,6 +619,7 @@ export class Game {
     this.inv.reset();
     this.player.reset();
     this.weapons.reset();
+    this.body.reset();
     this.animals.clear();
     this.pickups.clear();
     this.dayT = 0;
@@ -533,11 +627,18 @@ export class Game {
     this.bootsT = 0;
     this.sched = {};
     this._clearEffects();
+    this.pending.length = 0;
+    this.deathSeq = null;
+    this.lastKiller = null;
     this.radarRange = 130;
+    this.noise = 1;
+    this.world.setWeather('clear');
+    UI.setWeather('');
     this.slowmoT = 0;
     this.shake = 0;
     this.state = 'playing';
     this.weapons.root.visible = true;
+    this.body.root.visible = true;
     // строим чанки вокруг точки старта и отходим от ствола,
     // если игрок оказался вплотную к дереву
     this.world.update(this.player.x, this.player.z, 0, 0, this.camera);
@@ -548,6 +649,7 @@ export class Game {
     }
     this.player.y = terrainHeight(this.player.x, this.player.z);
     UI.hideAll();
+    UI.hideBag();
     UI.banner('УТРО. ТИХАЯ ОХОТА', '12 минут. Собирай быстро — множитель растёт', 3600, 'info');
     UI.toast('Полную тару сдавай в приёмном пункте (жёлтый луч)', 'info');
     this.player.requestLock();
@@ -569,16 +671,60 @@ export class Game {
   }
 
   _die(src) {
+    if (this.deathSeq) return;
     const lost = this.inv.onDeath();
-    Audio.stopAmbient();
-    this._end(true, src === 'poison'
-      ? 'Съел не то. Бледная поганка не шутит.'
-      : `${src} тебя достал. Потеряно ${fmtNum(lost)} несданных очков.`);
+    Audio.death();
+    UI.hideBag();
+    this.player.releaseLock();
+    // Пара секунд на то, чтобы разглядеть, кто именно тебя достал —
+    // мгновенный переход к таблице обесценивает смерть.
+    this.deathSeq = {
+      t: 0,
+      killer: src === 'poison' ? null : this.lastKiller,
+      reason: src === 'poison'
+        ? 'Съел не то. Бледная поганка не шутит.'
+        : `${src} тебя достал. Потеряно ${fmtNum(lost)} несданных очков.`,
+    };
+  }
+
+  /** Медленный доигрыш: камера разворачивается на убийцу. */
+  _updateDeath(raw) {
+    const d = this.deathSeq;
+    d.t += raw;
+    const p = this.player;
+    this.timeScale = 0.22;
+
+    if (d.killer && !d.killer.remove) {
+      const dx = wrapDelta(d.killer.x - p.x);
+      const dz = wrapDelta(d.killer.z - p.z);
+      const want = Math.atan2(-dx, -dz);
+      let diff = ((want - p.yaw + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
+      p.yaw += diff * Math.min(1, raw * 3.2);
+      const dy = (d.killer.g.position.y + d.killer.k.headY) - this.camera.position.y;
+      p.pitch = lerp(p.pitch, Math.atan2(dy, Math.hypot(dx, dz)), Math.min(1, raw * 3));
+    }
+    // оседаем на землю
+    p.y = dampTo(p.y, terrainHeight(p.x, p.z) - 0.85, 2.2, raw);
+    p.update(raw * 0.22, this.world);
+    this.animals.update(raw * 0.22, p);
+    this.body.update(raw, p, this.inv, this.weapons);
+    this.world.update(p.x, p.z, raw * 0.22, this.dayT / CONFIG.dayLength, this.camera);
+    this.shake = Math.max(this.shake, 0.25 * (1 - d.t / 2.8));
+    UI.setVitals(p);
+    UI.danger(Math.max(0, 1 - d.t / 2.8), 'ТЫ ПОГИБ');
+
+    if (d.t > 2.8) {
+      const reason = d.reason;
+      this.deathSeq = null;
+      Audio.stopAmbient();
+      this._end(true, reason);
+    }
   }
 
   async _end(died, reason) {
     if (this.state === 'ended') return;
     this.state = 'ended';
+    UI.hideBag();
     this.player.releaseLock();
     Audio.stopAmbient();
     if (!died) Audio.dayEnd();
@@ -633,6 +779,7 @@ export class Game {
   /** Медленный облёт леса за спиной главного меню. */
   _updateMenu(dt) {
     this.weapons.root.visible = false;
+    this.body.root.visible = false;
     this.menuT = (this.menuT || 0) + dt;
     const p = this.player;
     p.x = 190 + Math.cos(this.menuT * 0.06) * 26;
@@ -649,6 +796,8 @@ export class Game {
   }
 
   _update(raw) {
+    if (this.deathSeq) { this._updateDeath(raw); return; }
+
     // --- замедление времени в момент корриды ---
     let target = 1;
     for (const a of this.animals.list) {
@@ -663,12 +812,19 @@ export class Game {
     const left = CONFIG.dayLength - this.dayT;
 
     this._director(dt);
+    this._updatePending(dt);
+    Audio.setRain(this.world.wet || 0);
 
     const p = this.player;
     p.levelSpeed = this.inv.speedBonus;
     p.levelStamina = this.inv.staminaBonus;
+    p.carrySpeed = this.inv.speedPenalty;
+    p.carryDodge = this.inv.dodgePenalty;
+    // шум тары: вёдра гремят, звери находят быстрее. Плащ глушит.
+    this.noise = this.inv.noiseFactor * (this.effects.some((e) => e.id === 'raincoat') ? 0.55 : 1);
     this._updateEffects(dt);
     p.update(dt, this.world);
+    this.body.update(dt, p, this.inv, this.weapons);
     this.inv.update(dt);
     this.weapons.update(dt, p);
     this.animals.update(dt, p);
@@ -696,8 +852,14 @@ export class Game {
     } else if (this.aimed) {
       const sp = this.aimed.sp;
       const val = sp.price > 0 ? `+${fmtNum(sp.price * this.inv.totalMult)}` : `${fmtNum(sp.price)}`;
-      UI.setPrompt(`${sp.name} <em>${val}</em>${sp.tag ? ` <i>${sp.tag}</i>` : ''}`, 'ЛКМ');
-      UI.crosshairState(sp.price > 0 ? 'pick' : 'danger');
+      if (this.weapons.armed) {
+        // подсказка должна вести к решению, а не просто отказывать
+        UI.setPrompt(`убрать оружие, чтобы сорвать <i>${sp.name}</i>`, '1');
+        UI.crosshairState('busy');
+      } else {
+        UI.setPrompt(`${sp.name} <em>${val}</em>${sp.tag ? ` <i>${sp.tag}</i>` : ''}`, 'ЛКМ');
+        UI.crosshairState(sp.price > 0 ? 'pick' : 'danger');
+      }
     } else {
       UI.setPrompt('');
       UI.crosshairState(this.weapons.current === 'pistol' ? 'gun' : '');

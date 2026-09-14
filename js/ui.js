@@ -17,6 +17,7 @@ export const UI = {
       'radar', 'hp-num', 'tab-board', 'btn-again', 'btn-menu', 'btn-resume', 'btn-quit',
       'sens', 'sens-val', 'vol', 'vol-val', 'quality', 'vignette', 'end-sub', 'threat-ring',
       'level-num', 'level-fill', 'buffs', 'threat-arrow', 'radar-label', 'now-cue',
+      'bag', 'bag-body', 'bag-cap', 'weather',
     ];
     for (const id of ids) this.el[id] = $(id);
     this.radarCtx = this.el.radar ? this.el.radar.getContext('2d') : null;
@@ -112,16 +113,50 @@ export const UI = {
   },
 
   setWeapon(w) {
-    if (w.current === 'knife') {
-      this.el['weapon-name'].textContent = '🔪 Нож';
-      this.el['weapon-ammo'].textContent = w.has.pistol ? '[2] ТТ' : '';
-      this.el['weapon-ammo'].className = 'ammo hint';
+    const n = this.el['weapon-name'], a = this.el['weapon-ammo'];
+    if (w.current === 'hands') {
+      n.textContent = '🖐 Руки';
+      a.textContent = w.has.pistol ? '[2] нож · [3] ТТ' : '[2] нож';
+      a.className = 'ammo hint';
+    } else if (w.current === 'knife') {
+      n.textContent = '🔪 Нож';
+      a.textContent = '[1] руки';
+      a.className = 'ammo hint';
     } else {
-      this.el['weapon-name'].textContent = '🔫 ТТ';
-      this.el['weapon-ammo'].textContent = `${w.mag} / ${w.reserve}`;
-      this.el['weapon-ammo'].className = 'ammo' + (w.mag === 0 ? ' empty' : '');
+      n.textContent = '🔫 ТТ';
+      a.textContent = `${w.mag} / ${w.reserve}`;
+      a.className = 'ammo' + (w.mag === 0 ? ' empty' : '');
     }
-    this.el['weapon-name'].classList.toggle('reloading', w.reloadT > 0);
+    n.classList.toggle('reloading', w.reloadT > 0);
+    n.classList.toggle('unarmed', w.current === 'hands');
+  },
+
+  /** Что лежит в таре прямо сейчас. */
+  toggleBag(inv, speciesById) {
+    const el = this.el.bag;
+    if (!el.hidden) { el.hidden = true; return false; }
+    const rows = Object.entries(inv.bag)
+      .map(([id, n]) => ({ sp: speciesById[id], n }))
+      .filter((x) => x.sp)
+      .sort((a, b) => b.n * b.sp.price - a.n * a.sp.price);
+    this.el['bag-cap'].textContent =
+      `${inv.container.name} · ${inv.items}/${inv.cap} · ${fmtNum(inv.carryValue)} очков`;
+    this.el['bag-body'].innerHTML = rows.length
+      ? rows.map((x) => `<div class="bagrow"><span>${x.sp.name}</span>` +
+        `<b>×${x.n}</b><i>${fmtNum(x.n * x.sp.price * inv.container.mult)}</i></div>`).join('')
+      : '<div class="empty">Пусто. Иди собирай.</div>';
+    el.hidden = false;
+    return true;
+  },
+
+  hideBag() { this.el.bag.hidden = true; },
+
+  /** Строка погоды в углу. */
+  setWeather(text) {
+    const el = this.el.weather;
+    if (!el) return;
+    el.textContent = text || '';
+    el.classList.toggle('on', !!text);
   },
 
   setPrompt(text, key = '') {

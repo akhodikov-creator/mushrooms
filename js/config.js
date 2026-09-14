@@ -90,13 +90,23 @@ export const CONFIG = {
   mouseSensitivity: 1.0,
   masterVolume: 0.7,
   quality: 'high',          // high | low
+
+  // --- тара: вес и шум ---
+  dragBase: 0.35,           // доля штрафа, которая есть даже у пустой тары
+  dragDodge: 0.8,           // насколько вес режет рывок
 };
 
-// Тара: растёт по мере заполнения
+// Тара. Всё помещается в одной руке — вторая должна оставаться
+// свободной под нож или пистолет.
+//   cap   — сколько грибов влезает
+//   mult  — множитель цены
+//   drag  — насколько тяжелеет ход у полной тары (доля скорости)
+//   noise — во сколько раз дальше тебя слышат звери
 export const CONTAINERS = [
-  { name: 'Плетёная корзина', short: 'Корзина',  cap: 14,  icon: '🧺', mult: 1.0 },
-  { name: 'Эмалированное ведро', short: 'Ведро', cap: 30,  icon: '🪣', mult: 1.12 },
-  { name: 'Брезентовый рюкзак', short: 'Рюкзак', cap: 60,  icon: '🎒', mult: 1.28 },
-  { name: 'Садовая тележка', short: 'Тележка',   cap: 120, icon: '🛒', mult: 1.5 },
-  { name: 'Прицеп к «Буханке»', short: 'Прицеп', cap: 260, icon: '🚚', mult: 1.85 },
+  { name: 'Пакет-майка',    short: 'Пакет',      cap: 8,   icon: '🛍️', mult: 1.00, drag: 0.02, noise: 1.00, model: 'bagS' },
+  { name: 'Большой пакет',  short: 'Пакет XL',   cap: 16,  icon: '🛍️', mult: 1.10, drag: 0.05, noise: 1.06, model: 'bagL' },
+  { name: 'Ведёрко 3 литра', short: 'Ведёрко',   cap: 26,  icon: '🪣', mult: 1.22, drag: 0.08, noise: 1.16, model: 'pail3' },
+  { name: 'Ведро 5 литров', short: 'Ведро 5 л',  cap: 40,  icon: '🪣', mult: 1.34, drag: 0.12, noise: 1.22, model: 'pail5' },
+  { name: 'Ведро 10 литров', short: 'Ведро 10 л', cap: 70, icon: '🪣', mult: 1.52, drag: 0.18, noise: 1.30, model: 'pail10' },
+  { name: 'Лукошко 15 литров', short: 'Лукошко', cap: 110, icon: '🧺', mult: 1.72, drag: 0.24, noise: 1.10, model: 'basket' },
 ];
