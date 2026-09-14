@@ -276,6 +276,9 @@ export class Body {
     if (this.tier === tier) return;
     this.tier = tier;
     this.containerNode.clear();
+    // clear() выбросил и горку грибов — ссылку тоже надо сбросить,
+    // иначе после апгрейда тары наполнение перестаёт показываться
+    this.fillMesh = null;
     const def = CONTAINERS[tier];
     if (!def) return;
     const c = buildContainer(def.model);

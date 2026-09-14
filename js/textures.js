@@ -232,20 +232,37 @@ export const capTex = () => make('cap', 256, 256, (g, w, h) => {
   g.fillStyle = '#ffffff';
   g.fillRect(0, 0, w, h);
   const r = rng(2024);
-  for (let i = 0; i < 1400; i++) {
+
+  // мягкая неровность тона
+  for (let i = 0; i < 1200; i++) {
     const x = r() * w, y = r() * h;
     const v = r() < 0.5 ? 0 : 255;
-    g.fillStyle = `rgba(${v},${v},${v},${r() * 0.16})`;
+    g.fillStyle = `rgba(${v},${v},${v},${r() * 0.13})`;
     g.beginPath(); g.arc(x, y, 1 + r() * 11, 0, 6.28); g.fill();
   }
-  // радиальные волокна от центра
-  for (let i = 0; i < 150; i++) {
+
+  // Волокна. Раньше все 150 линий выходили ровно из центра холста,
+  // складывались там и выжигали чёрное пятно — на шляпке оно читалось
+  // как дырка. Теперь линии стартуют от кольца и не пересекают центр.
+  for (let i = 0; i < 130; i++) {
     const a = r() * 6.28;
-    g.strokeStyle = `rgba(0,0,0,${r() * 0.1})`;
-    g.lineWidth = 0.8 + r();
+    const r0 = 26 + r() * 34;
+    g.strokeStyle = `rgba(0,0,0,${0.015 + r() * 0.045})`;
+    g.lineWidth = 0.7 + r() * 1.1;
     g.beginPath();
-    g.moveTo(w / 2, h / 2);
+    g.moveTo(w / 2 + Math.cos(a) * r0, h / 2 + Math.sin(a) * r0);
     g.lineTo(w / 2 + Math.cos(a) * w, h / 2 + Math.sin(a) * h);
+    g.stroke();
+  }
+
+  // продольные штрихи: на развёртке боковины это радиальные волокна
+  for (let i = 0; i < 90; i++) {
+    const x = r() * w;
+    g.strokeStyle = `rgba(${r() < 0.5 ? '0,0,0' : '255,255,255'},${0.02 + r() * 0.05})`;
+    g.lineWidth = 0.7 + r() * 1.6;
+    g.beginPath();
+    g.moveTo(x, 0);
+    for (let y = 0; y <= h; y += 32) g.lineTo(x + Math.sin(y * 0.03 + i) * 3, y);
     g.stroke();
   }
 });

@@ -165,14 +165,18 @@ function capProfile(r, h, shape, stemR) {
   };
   for (let i = 0; i <= N; i++) {
     const t = i / N;
-    pts.push(new THREE.Vector2(Math.max(0.0012, r * t), yOf(t)));
+    // на макушке радиус ровно ноль, иначе остаётся микроотверстие
+    pts.push(new THREE.Vector2(i === 0 ? 0 : r * t, yOf(t)));
   }
-  // нижняя кромка и возврат к ножке (замыкаем силуэт)
+  // Нижняя кромка и возврат к оси. Профиль ОБЯЗАН прийти в радиус 0:
+  // если оборвать его на радиусе ножки, тело вращения остаётся с
+  // кольцевой дырой на макушке — именно она и просвечивала.
   const thick = Math.max(0.006, h * 0.2);
   pts.push(new THREE.Vector2(r * 0.985, yOf(1) - thick * 0.55));
   const inner = shape === 'funnel' || shape === 'flat' ? 0.35 : 0.55;
   pts.push(new THREE.Vector2(r * inner, yOf(0.45) - thick));
-  pts.push(new THREE.Vector2(Math.max(0.004, stemR * 0.9), Math.max(0.002, yOf(0) - thick * 1.5)));
+  pts.push(new THREE.Vector2(Math.max(0.004, stemR * 0.75), Math.max(0.002, yOf(0) - thick * 1.6)));
+  pts.push(new THREE.Vector2(0, Math.max(0.001, yOf(0) - thick * 1.9)));
   return pts;
 }
 
@@ -203,7 +207,16 @@ function buildMushroomGeometry(sp, rnd) {
     parts.push(paint(st, sp.stemColor));
   } else if (sp.shape !== 'ball') {
     const bulge = sp.shape === 'bulb' ? 1.55 : 1.0;
-    const st = new THREE.CylinderGeometry(stemR * 0.8, stemR * bulge, stemH, 8, 2);
+    const st = new THREE.CylinderGeometry(stemR * 0.8, stemR * bulge, stemH, 10, 4);
+    // ножка слегка ведёт в сторону — прямые как карандаш не растут
+    const sp2 = st.attributes.position;
+    const bx = (rnd() - 0.5) * stemR * 1.2, bz = (rnd() - 0.5) * stemR * 1.2;
+    for (let i = 0; i < sp2.count; i++) {
+      const t = (sp2.getY(i) + stemH / 2) / stemH;
+      sp2.setX(i, sp2.getX(i) + bx * t * t);
+      sp2.setZ(i, sp2.getZ(i) + bz * t * t);
+    }
+    st.computeVertexNormals();
     st.translate(0, stemH * 0.5, 0);
     parts.push(paint(st, sp.stemColor));
     // кольцо-вольва у мухоморов
@@ -230,7 +243,23 @@ function buildMushroomGeometry(sp, rnd) {
 
   // шляпка
   const prof = capProfile(capR, capH, sp.shape, stemR);
-  const cap = new THREE.LatheGeometry(prof, 14);
+  const cap = new THREE.LatheGeometry(prof, 18);
+  // Идеальное тело вращения выдаёт процедурку с первого взгляда:
+  // мнём окружность и заваливаем шляпку на случайную сторону.
+  const cp = cap.attributes.position;
+  const w1 = rnd() * TAU, w2 = rnd() * TAU;
+  const tiltA = rnd() * TAU, tiltK = 0.1 + rnd() * 0.12;
+  for (let i = 0; i < cp.count; i++) {
+    const x = cp.getX(i), y = cp.getY(i), z = cp.getZ(i);
+    const ang = Math.atan2(z, x);
+    const rr = Math.hypot(x, z);
+    const k = 1 + Math.sin(ang * 2 + w1) * 0.055 + Math.sin(ang * 3 + w2) * 0.04;
+    cp.setX(i, x * k);
+    cp.setZ(i, z * k);
+    // край шляпки провисает с одной стороны
+    cp.setY(i, y - Math.cos(ang - tiltA) * (rr / Math.max(0.001, capR)) * capH * tiltK);
+  }
+  cap.computeVertexNormals();
   cap.translate(0, stemH, 0);
   if (sp.shape === 'shelf') {
     cap.scale(1, 1, 0.62);
@@ -286,6 +315,8 @@ function buildMushroomGeometry(sp, rnd) {
    Кэш геометрий: по 3 варианта на вид
    ------------------------------------------------------------ */
 const geoCache = new Map();
+export const GEO_VARIANTS = 5;
+
 export function getMushroomGeometry(sp, variant) {
   const key = sp.id + ':' + variant;
   let g = geoCache.get(key);
@@ -375,7 +406,7 @@ export function generateChunkMushrooms(cx, cz, stumps) {
       if (px < 0 || px > cs || pz < 0 || pz > cs) continue;
       out.push({
         sp, lx: px, lz: pz,
-        variant: (rnd() * 3) | 0,
+        variant: (rnd() * GEO_VARIANTS) | 0,
         rot: rnd() * TAU,
         tilt: (rnd() - 0.5) * 0.24,
         onStump: !!nearStump && sp.onStump ? nearStump : null,
