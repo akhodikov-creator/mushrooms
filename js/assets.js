@@ -178,6 +178,12 @@ export function instance(name) {
   return applyFit(copy, (ASSETS[name] || {}).fit);
 }
 
+/** Клипы анимации слота (пустой список, если их нет). */
+export function animationsOf(name) {
+  const s = slots.get(name);
+  return (s && s.status === 'done' && s.animations) ? s.animations : [];
+}
+
 /** Стартует загрузку всех настроенных слотов. */
 export function warmAssets() {
   for (const name of Object.keys(ASSETS)) loadAsset(name);

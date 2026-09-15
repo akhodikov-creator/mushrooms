@@ -612,6 +612,23 @@ export class Game {
       }
     };
 
+    /* Прыжок с ударом по площади. Попал — отнимает здоровье и лезет
+       в тару; промахнулся — стоит отдыхает, и это окно для выстрела. */
+    A.onBossSlam = (boss, hit) => {
+      this.shake = hit ? 1.4 : 0.7;
+      Audio.hit(hit);
+      Audio.tone({ freq: 70, to: 38, dur: 0.5, type: 'sawtooth', gain: 0.2 });
+      if (!hit) {
+        UI.toast('Мимо! Пока он встаёт — стреляй', 'good');
+        return;
+      }
+      this.lastKiller = boss;
+      this.player.damage(boss.k.jumpDamage, boss.k.name);
+      this.player.vx -= Math.sin(boss.dir) * 11;
+      this.player.vz -= Math.cos(boss.dir) * 11;
+      UI.banner('ХОЗЯИН ПРИЗЕМЛИЛСЯ НА ТЕБЯ', `−${boss.k.jumpDamage} и сейчас полезет в тару`, 2400, 'bad');
+    };
+
     A.onKill = (a) => {
       if (a.k.boss) {
         // всё съеденное вываливается обратно, плюс премия за наглость
@@ -1161,7 +1178,11 @@ export class Game {
     // говорит не «уклоняйся», а «беги или стреляй».
     if (!dangerText) {
       const boss = this.animals.list.find((a) => a.k.boss && !a.dead && a.dist < 26);
-      if (boss) dangerText = `${boss.k.name} ИДЁТ ЗА ТАРОЙ  ·  РЫВОК НЕ СПАСЁТ`;
+      if (boss) {
+        dangerText = boss.state === 'jump'
+          ? `${boss.k.name} В ПРЫЖКЕ  ·  УХОДИ С МЕСТА`
+          : `${boss.k.name} ИДЁТ ЗА ТАРОЙ`;
+      }
     }
 
     // угол на зверя относительно взгляда — для стрелки на экране

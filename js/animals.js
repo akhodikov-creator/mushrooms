@@ -7,7 +7,7 @@ import {
 } from './utils.js';
 import { furTex, scaleTex } from './textures.js';
 import { clone as skeletonClone } from 'three/addons/utils/SkeletonUtils.js';
-import { instance, onAsset } from './assets.js';
+import { instance, onAsset, animationsOf } from './assets.js';
 
 /* ============================================================
    Материалы зверей: шерсть рисуется в canvas, поэтому силуэт
@@ -489,21 +489,15 @@ export function animalWarmupModels() {
 
 /* Хозяин бора. Не зверь: не разгоняется, не уклоняется, не убивает —
    отбирает собранное. Живёт по своему автомату, см. _updateBoss. */
-/* Размах бедра и во сколько радиан фазы обходится метр пути.
-   Ноги у хозяина короткие, шаг выходит около 0,8 м — отсюда и число. */
-const BOSS_STRIDE = 0.85;
-const GAIT_PER_M = Math.PI / 0.8;
-
-const BOSS_BONES = [
-  'thighL', 'thighR', 'shinL', 'shinR', 'footL', 'footR',
-  'upper_armL', 'upper_armR', 'forearmL', 'forearmR', 'spine002',
-];
-
 KINDS.shroom = {
   name: 'ХОЗЯИН БОРА', build: buildShroom, hp: 10, scale: 1.0,
   boss: true,
-  walkSpeed: 4.25,        // быстрее шага игрока, медленнее спринта
-  grabRange: 3.2,
+  walkSpeed: 3.6,         // тяжёлый шаг вразвалку
+  sprintSpeed: 8.2,       // рывком догоняет даже бегущего
+  sprintFrom: 16,         // дальше этого переходит на бег
+  jumpFrom: 6.5,          // отсюда прыгает
+  jumpRadius: 3.6,        // радиус поражения при приземлении
+  jumpDamage: 50,
   grabTake: 0.35,         // какую долю тары выгребает за раз
   grabMin: 3,
   life: 78,               // сколько держится, если не убить
@@ -544,10 +538,23 @@ class Animal {
     // костями: трёхметровая туша, скользящая по траве, читается как
     // ошибка, а не как чудище.
     if (this.k.boss) {
-      this.bone = {};
-      for (const n of BOSS_BONES) {
-        const b = m.g.getObjectByName(n);
-        if (b) { b.userData.rest = b.rotation.x; this.bone[n] = b; }
+      // Клипы из Mixamo: своя ходьба, рывок, прыжок с ударом и кража.
+      // Микшер у каждого свой — скелет-то тоже свой, клонированный.
+      const clips = animationsOf('shroom');
+      if (clips.length) {
+        this.mixer = new THREE.AnimationMixer(m.g);
+        this.act = {};
+        for (const c of clips) {
+          const a = this.mixer.clipAction(c);
+          a.enabled = true;
+          this.act[c.name] = a;
+        }
+        for (const once of ['jump', 'steal']) {
+          if (this.act[once]) {
+            this.act[once].setLoop(THREE.LoopOnce, 1);
+            this.act[once].clampWhenFinished = true;
+          }
+        }
       }
     }
     this.head = m.head;
@@ -611,100 +618,123 @@ class Animal {
    * выгребает собранное. Угроза не жизни, а урожаю: беги сдавать
    * или стой и стреляй.
    */
-  /**
-   * Походка хозяина костями рига.
-   * Ось сгиба у скачанного рига заранее не известна; подобрана по
-   * виду сбоку, как в своё время ось пальцев у кистей.
-   */
-  _poseBoss() {
-    const B = this.bone;
-    if (!B) return;
-    const walking = this.state === 'walk';
-    const grabbing = this.state === 'grab';
-    const ph = walking ? (this.gait || 0) : this.animT * 1.2;
-    const sw = walking ? BOSS_STRIDE : 0.07;
-    const set = (n, v) => { const b = B[n]; if (b) b.rotation.x = (b.userData.rest || 0) + v; };
-
-    const l = Math.sin(ph), r = Math.sin(ph + Math.PI);
-    set('thighL', l * sw);
-    set('thighR', r * sw);
-    // колено гнётся только назад, и сильнее всего в момент подъёма ноги
-    set('shinL', Math.max(0, -l) * sw * 1.5);
-    set('shinR', Math.max(0, -r) * sw * 1.5);
-    set('footL', -Math.max(0, -l) * sw * 0.7);
-    set('footR', -Math.max(0, -r) * sw * 0.7);
-
-    // руки маятником навстречу ногам, а в замахе тянутся к таре
-    const reach = grabbing ? Math.sin(Math.min(1, this.t / 1.1) * Math.PI) : 0;
-    set('upper_armL', r * sw * 0.55 - reach * 1.5);
-    set('upper_armR', l * sw * 0.55 - reach * 1.5);
-    set('forearmL', -reach * 0.8);
-    set('forearmR', -reach * 0.8);
-    set('spine002', Math.sin(ph * 2) * (walking ? 0.05 : 0.02) + reach * 0.35);
+  /** Переключить клип с перекрёстным затуханием. */
+  _play(name, fade = 0.25, speed = 1) {
+    if (!this.act || !this.act[name] || this.clip === name) return;
+    const next = this.act[name];
+    next.reset();
+    next.timeScale = speed;
+    next.fadeIn(fade).play();
+    if (this.clip && this.act[this.clip]) this.act[this.clip].fadeOut(fade);
+    this.clip = name;
+    this.clipT = 0;
   }
 
+  /**
+   * Хозяин бора.
+   *
+   * Зверь — это коррида: разгон по прямой и рывок в последний момент.
+   * Хозяин устроен иначе: выходит из земли, идёт вразвалку, с дальней
+   * дистанции переходит на бег, а вблизи прыгает и бьёт по площади.
+   * Попал — отнимает здоровье и лезет в тару; промахнулся — стоит
+   * отдыхает, и это единственное окно, чтобы всадить в него пулю.
+   */
   _updateBoss(dt, player, mgr) {
     this.animT += dt;
     if (this.flash > 0) this.flash -= dt;
     this.t += dt;
     this.age = (this.age || 0) + dt;
+    if (this.mixer) this.mixer.update(dt);
 
     const dx = wrapDelta(player.x - this.x);
     const dz = wrapDelta(player.z - this.z);
     const dist = Math.hypot(dx, dz);
-    this.dir = Math.atan2(-dx, -dz);
-
     const k = this.k;
-    const grow = 1 + (this.meals || 0) * 0.09;      // с каждой кражи крупнее
+    const grow = 1 + (this.meals || 0) * 0.07;
+    let step = 0;
+
+    // в прыжке он летит по заранее взятой линии, иначе смотрит на игрока
+    if (this.state !== 'jump') this.dir = Math.atan2(-dx, -dz);
 
     switch (this.state) {
-      case 'spawn': {                                // вырастает из земли
+      case 'spawn': {
         const t = Math.min(1, this.t / 2.2);
         this.rise = t;
         if (!this.greeted) { this.greeted = true; Audio.shroom(); }
+        this._play('walk', 0.01);
         if (t >= 1) { this.state = 'walk'; this.t = 0; }
         break;
       }
+
       case 'walk': {
-        const sp = k.walkSpeed * (1 + (this.meals || 0) * 0.06);
-        this.x = wrapCoord(this.x + (dx / (dist || 1)) * sp * dt);
-        this.z = wrapCoord(this.z + (dz / (dist || 1)) * sp * dt);
-        // Фазу шага крутим пройденным путём, а не временем: иначе ноги
-        // живут своей жизнью и туша едет по траве, как на коньках.
-        this.gait = (this.gait || 0) + sp * dt * GAIT_PER_M;
-        if (dist < k.grabRange) { this.state = 'grab'; this.t = 0; }
+        this._play('walk', 0.3);
+        step = k.walkSpeed * (1 + (this.meals || 0) * 0.05);
+        // вплотную прыгать незачем — просто лезет в тару
+        if (dist < 2.4) { this.state = 'steal'; this.t = 0; this.took = false; }
+        else if (dist < k.jumpFrom) { this.state = 'jump'; this.t = 0; this._startJump(dx, dz, dist); }
+        else if (dist > k.sprintFrom) { this.state = 'sprint'; this.t = 0; }
         else if (this.age > k.life) { this.state = 'sink'; this.t = 0; }
         break;
       }
-      case 'grab': {                                 // замах и хват
-        if (this.t > 0.55 && !this.took) {
+
+      case 'sprint': {
+        this._play('sprint', 0.22);
+        step = k.sprintSpeed;
+        if (dist < k.jumpFrom) { this.state = 'jump'; this.t = 0; this._startJump(dx, dz, dist); }
+        else if (dist > k.sprintFrom * 2.2 || this.age > k.life) { this.state = 'walk'; this.t = 0; }
+        break;
+      }
+
+      case 'jump': {
+        this._play('jump', 0.12, 1.35);
+        const d = (this.act && this.act.jump) ? this.act.jump.getClip().duration / 1.35 : 2.8;
+        const p = this.t / d;
+        // разгон и полёт занимают середину клипа, приземление на 62%
+        if (p > 0.18 && p < 0.62) step = this.jumpSpeed;
+        if (p >= 0.62 && !this.landed) {
+          this.landed = true;
+          this.jumpY = 0;
+          const hit = dist < k.jumpRadius;
+          mgr.onBossSlam?.(this, hit);
+          if (hit) { this.state = 'steal'; this.t = 0; this.took = false; break; }
+        }
+        if (p >= 1) { this.state = 'recover'; this.t = 0; }
+        break;
+      }
+
+      case 'steal': {
+        this._play('steal', 0.15);
+        const d = (this.act && this.act.steal) ? this.act.steal.getClip().duration : 2.6;
+        if (this.t > d * 0.42 && !this.took) {
           this.took = true;
           Audio.shroomGrab();
           mgr.onSteal?.(this);
         }
-        if (this.t > 1.1) { this.state = 'chew'; this.t = 0; this.took = false; }
+        if (this.t > d) { this.state = 'recover'; this.t = 0; }
         break;
       }
-      case 'chew': {                                 // жуёт и отходит
-        const back = 2.2 * dt;
-        this.x = wrapCoord(this.x - (dx / (dist || 1)) * back);
-        this.z = wrapCoord(this.z - (dz / (dist || 1)) * back);
-        if (this.t > 2.8) {
+
+      case 'recover': {
+        this._play('walk', 0.3, 0.35);          // топчется, переводит дух
+        if (this.t > 2.2) {
           this.state = this.age > k.life ? 'sink' : 'walk';
           this.t = 0;
+          this.landed = false;
         }
         break;
       }
-      case 'sink': {                                 // уходит обратно в землю
+
+      case 'sink': {
         this.rise = Math.max(0, 1 - this.t / 1.8);
         if (this.t > 1.8) {
           this.dead = true;
           this.fade = 0;
-          this.remove = true;            // список чистит менеджер
+          this.remove = true;
           mgr.onLeave?.(this);
         }
         break;
       }
+
       case 'dead': {
         this.fade -= dt * 0.55;
         if (this.fade <= 0) { this.fade = 0; this.remove = true; }
@@ -712,7 +742,11 @@ class Animal {
       }
     }
 
-    // посадка на рельеф + «подъём из земли» прячем под землю
+    if (step > 0 && dist > 0.001) {
+      this.x = wrapCoord(this.x + (dx / dist) * step * dt);
+      this.z = wrapCoord(this.z + (dz / dist) * step * dt);
+    }
+
     this.y = terrainHeight(this.x, this.z);
     const hide = (1 - (this.rise ?? 1)) * 3.4;
     this.g.position.set(
@@ -721,14 +755,17 @@ class Animal {
       player.z + wrapDelta(this.z - player.z)
     );
     this.g.rotation.y = this.dir;
-    const sway = this.state === 'walk' ? Math.sin(this.animT * 3.4) * 0.06 : 0;
-    this.g.rotation.z = sway;
-    const lunge = this.state === 'grab' ? Math.sin(Math.min(1, this.t / 1.1) * Math.PI) * 0.5 : 0;
-    this.g.rotation.x = lunge;
     this.g.scale.setScalar(grow);
-    this._poseBoss();
     this.dist = dist;          // им пользуются радар и шкала опасности
     return dist;
+  }
+
+  /** Замах перед прыжком: цель берётся один раз, дальше он летит по ней. */
+  _startJump(dx, dz, dist) {
+    this.landed = false;
+    // долетает ровно туда, где игрок стоял в момент отрыва
+    this.jumpSpeed = Math.max(6, Math.min(15, dist / 0.9));
+    this.dir = Math.atan2(-dx, -dz);
   }
 
   update(dt, player, mgr) {

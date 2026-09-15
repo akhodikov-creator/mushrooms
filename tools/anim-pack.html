@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><base href="../"><title>anim pack</title>
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.168.0/build/three.module.js",
+"three/addons/":"https://cdn.jsdelivr.net/npm/three@0.168.0/examples/jsm/"}}
+</script></head>
+<body style="background:#111;color:#9fb;font:13px/1.6 monospace;padding:12px">
+<pre id="out">жду: window.__pack()</pre>
+<script type="module">
+/* Сборка одной модели с несколькими анимациями.
+   Mixamo отдаёт по файлу на клип, и в каждом лежит полная копия меша:
+   четыре анимации — четыре меша, 3 МБ вместо одного. Здесь меш берётся
+   из первого файла, клипы из всех, и всё пишется одним .glb. */
+import * as THREE from 'three';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+
+const log = (t) => { document.getElementById('out').textContent += '\n' + t; };
+
+const SRC = [
+  ['walk', 'assets/_anim_walk.fbx'],
+  ['sprint', 'assets/_anim_sprint.fbx'],
+  ['jump', 'assets/_anim_jump.fbx'],
+  ['steal', 'assets/_anim_steal.fbx'],
+];
+
+window.__pack = async (outName = 'assets/shroom_anim.glb') => {
+  const load = (url) => new Promise((ok, no) => new FBXLoader().load(url, ok, undefined, no));
+
+  let root = null;
+  const clips = [];
+  for (const [name, url] of SRC) {
+    const obj = await load(url);
+    const cl = obj.animations && obj.animations[0];
+    if (!cl) { log(`${url}: клипа нет`); continue; }
+    cl.name = name;
+    clips.push(cl);
+    log(`${name}: ${cl.duration.toFixed(2)} c, дорожек ${cl.tracks.length}`);
+    if (!root) root = obj;
+  }
+  if (!root) return 'нечего паковать';
+
+  // мех и скелет берём из первого файла, остальные нужны были только ради клипов
+  root.traverse((o) => {
+    if (o.isMesh) {
+      o.material = new THREE.MeshStandardMaterial({ name: 'shroom', roughness: 0.85 });
+      log(`меш ${o.name}: ${o.geometry.attributes.position.count} вершин, ` +
+          `развёртка ${o.geometry.attributes.uv ? 'есть' : 'НЕТ'}`);
+    }
+  });
+
+  const glb = await new Promise((ok, no) =>
+    new GLTFExporter().parse(root, ok, no, { binary: true, animations: clips }));
+  log(`glb: ${(glb.byteLength / 1024).toFixed(0)} КБ, клипов ${clips.length}`);
+
+  const r = await fetch('/' + outName, { method: 'PUT', body: glb });
+  log(`сохранено: ${r.status} ${await r.text()}`);
+  return { кБ: Math.round(glb.byteLength / 1024), клипы: clips.map((c) => c.name) };
+};
+log('готово к работе');
+</script></body></html>
