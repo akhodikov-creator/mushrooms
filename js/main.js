@@ -4,6 +4,7 @@ import { UI } from './ui.js';
 import { Leaderboard } from './leaderboard.js';
 import { Game } from './game.js';
 import { warmAssets } from './assets.js';
+import { loadPlants } from './plants.js';
 import { setDemand, demandLabel } from './mushrooms.js';
 import { setDaySeed, todaySeed, seedLabel } from './utils.js';
 
@@ -33,6 +34,22 @@ if (CONFIG.quality === 'low') {
 
 // Внешние модели тянем в фоне: пока их нет, играем на процедурных.
 warmAssets();
+
+/* Кит растений — исключение из «в фоне». Его трава и кусты замешаны и
+   в чанки, и в ближний ковёр, а ковёр собирается прямо в конструкторе
+   мира: приди кит позже — половина леса осталась бы процедурной.
+   Мегабайт успевает дойти, пока игрок вбивает ник. Если не дошёл,
+   loadPlants вернёт false, и лес будет ровно таким, как до кита.
+   Адрес с ?noplants=1 выключает кит: так можно сравнить лес до и
+   после, не трогая файлы. */
+UI.el['btn-play'].disabled = true;
+if (!/[?&]noplants=1/.test(location.search)) {
+  await Promise.race([
+    loadPlants(),
+    new Promise((ok) => setTimeout(() => ok(false), 12000)),
+  ]);
+}
+UI.el['btn-play'].disabled = false;
 
 const game = new Game();
 window.__game = game;   // для отладки из консоли

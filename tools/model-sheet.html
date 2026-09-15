@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><base href="../"><title>sheet</title>
+<style>html,body{margin:0;background:#15181d;font:11px/1.3 monospace;color:#9fb}
+#wrap{position:relative}canvas{display:block}
+.lab{position:absolute;color:#bfe;text-shadow:0 1px 2px #000;pointer-events:none}
+#hud{padding:6px 8px;color:#7f9}</style>
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.168.0/build/three.module.js",
+"three/addons/":"https://cdn.jsdelivr.net/npm/three@0.168.0/examples/jsm/"}}
+</script></head><body>
+<div id="hud">гружу…</div><div id="wrap"><canvas id="c"></canvas></div>
+<script type="module">
+/* Контактный лист чужой модели: каждый именованный узел в своей ячейке.
+   ?url=…      файл (.gltf/.glb)
+   ?cols=6     колонок
+   ?cell=240   сторона ячейки
+   ?common=1   единый масштаб на всех (видно, кто кого выше)
+   ?mask=1     BLEND-материалы перевести в alphaTest, как пойдёт в игру */
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const q = new URLSearchParams(location.search);
+const URL_ = q.get('url') || '_plants_tmp.gltf';
+const COLS = +(q.get('cols') || 6);
+const CELL = +(q.get('cell') || 240);
+const COMMON = q.get('common') === '1';
+const MASK = q.get('mask') === '1';
+const ATLAS = q.get('atlas') === '1';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x15181d);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x3a4a55, 2.2));
+const dl = new THREE.DirectionalLight(0xffffff, 2.0); dl.position.set(0.5, 1, 0.7); scene.add(dl);
+const dl2 = new THREE.DirectionalLight(0xffffff, 0.7); dl2.position.set(-0.6, 0.3, -0.5); scene.add(dl2);
+
+new GLTFLoader().load(URL_, (g) => { run(g.scene); }, undefined,
+  (e) => { document.getElementById('hud').textContent = 'ошибка: ' + e; });
+
+async function run(root) {
+  const items = [];
+  scene.add(root);
+  root.updateWorldMatrix(true, true);
+  // «Ромашка__bark» и «Ромашка__leaf» — одно растение, показываем в одной ячейке
+  const byBase = new Map();
+  for (const n of root.children.slice()) {
+    let has = false;
+    n.traverse((o) => { if (o.isMesh) has = true; });
+    if (!has) continue;
+    const base = n.name.replace(/__(bark|leaf)$/, '');
+    if (base === n.name) { items.push(n); continue; }
+    let grp = byBase.get(base);
+    if (!grp) { grp = new THREE.Group(); grp.name = base; byBase.set(base, grp); root.add(grp); items.push(grp); }
+    grp.add(n);
+  }
+  // листву в игре рисуем отсечением по альфе, а не смешиванием
+  if (MASK) root.traverse((o) => {
+    if (!o.isMesh) return;
+    const m = o.material;
+    if (m.transparent) { m.transparent = false; m.alphaTest = 0.5; m.depthWrite = true; }
+  });
+  // собранный кит: материалов в файле нет, вешаем атлас по имени меша
+  if (ATLAS) {
+    const tl = new THREE.TextureLoader();
+    // лист рисуется одним кадром, так что картинки должны прийти до него
+    const tex = async (u) => { const t = await tl.loadAsync(u); t.colorSpace = THREE.SRGBColorSpace; t.flipY = false; return t; };
+    const leaf = new THREE.MeshStandardMaterial({
+      map: await tex('assets/plants.webp'), alphaTest: 0.5, side: THREE.DoubleSide, roughness: 0.9 });
+    const bark = new THREE.MeshStandardMaterial({
+      map: await tex('assets/plants_bark.webp'), roughness: 0.95 });
+    bark.map.wrapS = bark.map.wrapT = THREE.RepeatWrapping;
+    root.traverse((o) => {
+      if (o.isMesh) o.material = /__bark$/.test(o.name) ? bark : leaf;
+    });
+  }
+
+  const rows = Math.ceil(items.length / COLS);
+  const W = COLS * CELL, H = rows * CELL;
+  const cv = document.getElementById('c');
+  // рисуем лист один раз, дальше только смотрим — буфер должен пережить кадр
+  const r = new THREE.WebGLRenderer({ canvas: cv, antialias: true, preserveDrawingBuffer: true });
+  r.setPixelRatio(1); r.setSize(W, H); r.setScissorTest(true);
+  r.outputColorSpace = THREE.SRGBColorSpace;
+
+  // габарит каждого узла
+  const info = items.map((n) => {
+    const b = new THREE.Box3().setFromObject(n);
+    return { n, b, c: b.getCenter(new THREE.Vector3()), s: b.getSize(new THREE.Vector3()) };
+  });
+  const maxR = Math.max(...info.map((o) => Math.max(o.s.x, o.s.y, o.s.z)));
+
+  const cam = new THREE.PerspectiveCamera(30, 1, 0.01, 400);
+  r.setViewport(0, 0, W, H); r.setScissor(0, 0, W, H);
+  r.setClearColor(0x15181d, 1); r.clear();
+
+  const wrap = document.getElementById('wrap');
+  info.forEach((o, i) => {
+    items.forEach((n, j) => { n.visible = (j === i); });
+    const col = i % COLS, row = (i / COLS) | 0;
+    const x = col * CELL, y = H - (row + 1) * CELL;
+    r.setViewport(x, y, CELL, CELL);
+    r.setScissor(x + 1, y + 1, CELL - 2, CELL - 2);
+    const reach = COMMON ? maxR : Math.max(o.s.x, o.s.y, o.s.z);
+    const d = reach * 2.0;
+    // чуть сверху и сбоку — так силуэт дерева читается лучше всего
+    cam.position.set(o.c.x + d * 0.42, o.c.y + d * 0.30, o.c.z + d * 0.86);
+    cam.lookAt(o.c.x, o.c.y, o.c.z);
+    cam.near = d / 100; cam.far = d * 6; cam.updateProjectionMatrix();
+    r.render(scene, cam);
+    const lab = document.createElement('div');
+    lab.className = 'lab';
+    lab.style.left = (x + 4) + 'px';
+    lab.style.top = (row * CELL + 4) + 'px';
+    lab.textContent = o.n.name + '\n' + o.s.y.toFixed(2) + ' м';
+    lab.style.whiteSpace = 'pre';
+    wrap.appendChild(lab);
+  });
+  items.forEach((n) => { n.visible = true; });
+  document.getElementById('hud').textContent =
+    'узлов: ' + items.length + ' | масштаб: ' + (COMMON ? 'общий' : 'по каждому') +
+    ' | альфа: ' + (MASK ? 'отсечение' : 'как в файле');
+  window.__ready = true;
+}
+</script></body></html>

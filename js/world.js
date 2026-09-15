@@ -14,6 +14,7 @@ import {
   metalTex, woodTex, getEnvMap,
 } from './textures.js';
 import { onAsset, instance } from './assets.js';
+import { plantsLoaded, plantTextures, hasPlants, scaledPart, scaledTree } from './plants.js';
 
 const CS = CONFIG.chunkSize;
 const GRID = Math.round(WS / CS);          // 8
@@ -418,6 +419,62 @@ function buildLog() {
   return mergeParts(p);
 }
 
+/**
+ * Материалы кита. Собираются лениво: текстуры приходят из сети, а MAT
+ * объявлен на разборе модуля.
+ *
+ * Листва вся в одном атласе, так что материалов нужно всего два — и
+ * различаются они только ветром. Трава гнётся от самой земли и сильно,
+ * крона лишь колышется и только выше полутора метров; одним значением
+ * это не покрыть, а текстура у обоих одна и та же, так что лишней
+ * памяти на GPU второй материал не занимает.
+ */
+function initKitMaterials() {
+  if (MAT.kitLeaf || !plantsLoaded()) return;
+  const T = plantTextures();
+  MAT.kitLeaf = addWind(new THREE.MeshLambertMaterial({
+    vertexColors: true, map: T.atlas, alphaTest: 0.45, side: THREE.DoubleSide,
+  }), 0.014, 1.5);
+  MAT.kitGrass = addWind(new THREE.MeshLambertMaterial({
+    vertexColors: true, map: T.atlas, alphaTest: 0.45, side: THREE.DoubleSide,
+  }), 0.42, 0.02);
+  MAT.kitBark = new THREE.MeshStandardMaterial({
+    vertexColors: true, map: T.bark, roughness: 0.95, metalness: 0,
+  });
+  // Берёзе нужна своя кора: выдел так и называется, и белые стволы —
+  // единственное, чем березняк читается с полусотни метров. Развёртка
+  // ствола кита мостится шестнадцать раз по высоте, поэтому шаг
+  // текстуры делится на те же шестнадцать, иначе выйдет серая каша.
+  const tb = birchTex();
+  tb.repeat.set(1.6, 4 / 16);
+  MAT.kitBirch = new THREE.MeshStandardMaterial({
+    vertexColors: true, map: tb, roughness: 0.85, metalness: 0,
+  });
+}
+
+/* Лиственные породы берём из кита: [имя в ките, высота в метрах].
+   По два роста на выдел — взрослое дерево и подрост. Хвойных в ките
+   нет вовсе, так что сосна и ель остаются процедурными: бор и ельник
+   держатся именно на хвойном силуэте.
+   Рост подогнан под соседей: сосна в лесу 15 м, берёза была 14, осина
+   12.5 — кит должен встать вровень, иначе лиственные читаются подлеском. */
+const KIT_TREES = {
+  birch: [['Tree-01-1', 14.0], ['Tree-01-4', 9.0]],
+  aspen: [['Tree-02-2', 13.0], ['Tree-02-4', 8.5]],
+};
+/* Подлесок: [имя, высота]. Сухие места — куст, сырые — раскидистый.
+   Каждая форма — отдельный инстанс-меш, то есть отдельный вызов
+   отрисовки на чанк. Трёх на весь подлесок достаточно: дальше растёт
+   счёт вызовов, а не разнообразие — кусты и так крутит по оси. */
+const KIT_BUSH = [['Bush-02', 1.15], ['Bush-04', 1.30]];
+const KIT_WET = [['Bush-05', 1.75]];
+/* Напочвенный ковёр: клевер плоский и почти ничего не стоит. */
+const KIT_CLOVER = ['Clover-01', 'Clover-03', 'Clover-05'];
+/* Трава в ките снята с сухого луга — соломенная. На зелёной подстилке
+   такие пучки читаются не травой, а бурым мусором, поэтому тон уводим
+   в зелень. На поляне выдел сам вернёт желтизну своим множителем. */
+const KIT_GRASS_TINT = [0.50, 0.82, 0.58];
+
 const GEO = {};
 function initGeometries() {
   if (GEO.pine) return;
@@ -432,6 +489,85 @@ function initGeometries() {
   GEO.rock = buildRock();
   GEO.stump = buildStump();
   GEO.log = buildLog();
+  initKit();
+}
+
+/**
+ * Подмена процедурных заготовок китом — там, где кит лучше.
+ * Всё, чего в ките нет (сосна, ель, ягель, камни, пни), остаётся своим,
+ * и если файл не доехал, лес просто выглядит как раньше.
+ */
+function initKit() {
+  initKitMaterials();
+  if (!plantsLoaded()) return;
+  // На «низком» качестве кит остаётся, но без излишеств: листва кита —
+  // крупные карточки с отсечением по альфе, и платят за неё заливкой,
+  // а не треугольниками. Ковёр клевера, вторые формы кустов и подрост
+  // — первое, чем стоит пожертвовать на слабой машине.
+  const low = CONFIG.quality === 'low';
+
+  // Трава. Один пучок кита — это две скрещённые карточки на 10
+  // треугольников, и поодиночке он читается не травой, а торчащими
+  // соломинами. Склеиваем два под углом: густота выходит как у
+  // процедурного кустика, а треугольников те же 20, что и раньше.
+  // Высоту держим прежнюю: выше — и шляпка боровика тонет с головой.
+  if (hasPlants('Grass-01')) {
+    const tuft = [];
+    for (const [n, ang, dx, dz] of [['Grass-01', 0, 0, 0], ['Grass-03', 1.15, 0.07, 0.05]]) {
+      const gg = hasPlants(n) ? scaledPart(n, 'leaf', 0.44) : null;
+      if (!gg) continue;
+      gg.rotateY(ang);
+      gg.translate(dx, 0, dz);
+      tuft.push(gg);
+    }
+    GEO.kitGrass = tuft.length > 1 ? mergeParts(tuft) : tuft[0];
+    // Дальний слой чанка — одиночная карточка. Там пучок стоит раз на
+    // тридцать квадратов и с двадцати метров всё равно неразличим, а
+    // вторая половинка стоила бы сто тридцать тысяч треугольников.
+    GEO.kitGrassFar = scaledPart('Grass-01', 'leaf', 0.44);
+  }
+  // Клевер берём как есть: коврик 1.6 м шириной и 7 см высотой. Тянуть
+  // его по высоте нельзя — масштаб общий, и от «подросшего» клевера
+  // коврик расплывается на два с лишним метра.
+  for (const n of (low ? [] : KIT_CLOVER)) {
+    if (!hasPlants(n)) continue;
+    (GEO.kitClover || (GEO.kitClover = [])).push(scaledPart(n, 'leaf', 0));
+  }
+  const bushes = (list) => {
+    const out = [];
+    for (const [n, h] of (low ? list.slice(0, 1) : list)) {
+      if (hasPlants(n)) out.push(scaledPart(n, 'leaf', h));
+    }
+    return out.length ? out : null;
+  };
+  GEO.kitBush = bushes(KIT_BUSH);
+  GEO.kitWet = bushes(KIT_WET);
+  if (hasPlants('Flowers-02')) GEO.kitFlower = scaledPart('Flowers-02', 'leaf', 0.75);
+
+  // Деревья: по два роста на породу, ствол и крона отдельными мешами.
+  GEO.kit = {};
+  for (const sp of Object.keys(KIT_TREES)) {
+    const vs = [];
+    for (const [n, h] of (low ? KIT_TREES[sp].slice(0, 1) : KIT_TREES[sp])) {
+      if (!hasPlants(n)) continue;
+      const t = scaledTree(n, h);
+      if (t) vs.push(t);
+    }
+    if (vs.length) GEO.kit[sp] = vs;
+  }
+}
+
+/** Варианты породы: кит, если он есть на эту породу, иначе своя одна заготовка. */
+function treeVariants(t) {
+  const k = GEO.kit && GEO.kit[t];
+  if (k) return k.map((v) => ({ trunk: v.bark, foliage: v.leaf, kit: true }));
+  return [{ trunk: GEO[t].trunk, foliage: GEO[t].foliage, kit: false }];
+}
+
+/** Материалы варианта: у кита своя кора и общий атлас листвы. */
+function treeMats(t, kit) {
+  if (!kit) return [MAT[TREE_MAT[t].trunk], MAT[TREE_MAT[t].foliage]];
+  return [t === 'birch' ? MAT.kitBirch : MAT.kitBark, MAT.kitLeaf];
 }
 
 /** Какой материал у ствола и кроны каждой породы. */
@@ -709,7 +845,11 @@ class Chunk {
       const r = rnd();
       const t = r < mix[0] ? 'pine' : r < mix[1] ? 'spruce' : r < mix[2] ? 'birch' : 'aspen';
       const s = 0.72 + rnd() * 0.62;
-      byType[t].push({ lx, lz, y: terrainHeight(wx, wz), s, rot: rnd() * TAU });
+      // Подрост реже взрослого дерева: сплошной молодняк читается
+      // кустарником, а не лесом.
+      const nv = treeVariants(t).length;
+      const v = nv < 2 ? 0 : (rnd() < 0.72 ? 0 : 1 + ((rnd() * (nv - 1)) | 0));
+      byType[t].push({ lx, lz, y: terrainHeight(wx, wz), s, v, rot: rnd() * TAU });
       this.treeCols.push(lx, lz, 0.34 * s + 0.2);
     }
     const m4 = new THREE.Matrix4();
@@ -722,36 +862,42 @@ class Chunk {
     // Ствол и крона — разные материалы (кора против хвои с прозрачностью),
     // поэтому на породу приходится два инстанс-меша.
     for (const t of TREE_TYPES) {
-      const list = byType[t];
-      if (!list.length) continue;
-      const mats = TREE_MAT[t];
-      const pair = [
-        { geo: GEO[t].trunk, mat: MAT[mats.trunk], shadow: true },
-        { geo: GEO[t].foliage, mat: MAT[mats.foliage], shadow: true },
-      ];
-      // одинаковые матрицы для обеих частей — считаем один раз
-      const mats4 = [], cols = [];
-      for (const o of list) {
-        q.setFromAxisAngle(UP, o.rot);
-        sc.set(o.s * (0.9 + rnd() * 0.2), o.s, o.s * (0.9 + rnd() * 0.2));
-        v3.set(o.lx, o.y, o.lz);
-        mats4.push(m4.clone().compose(v3, q, sc));
-        const j = 0.85 + rnd() * 0.3;
-        cols.push(new THREE.Color(j, j * (0.96 + rnd() * 0.08), j * 0.97));
-      }
-      for (const part of pair) {
-        const im = new THREE.InstancedMesh(part.geo, part.mat, list.length);
-        im.instanceMatrix.setUsage(THREE.StaticDrawUsage);
-        for (let i = 0; i < list.length; i++) {
-          im.setMatrixAt(i, mats4[i]);
-          im.setColorAt(i, cols[i]);
+      if (!byType[t].length) continue;
+      const vars = treeVariants(t);
+      for (let vi = 0; vi < vars.length; vi++) {
+        const list = vars.length < 2 ? byType[t] : byType[t].filter((o) => o.v === vi);
+        if (!list.length) continue;
+        const [mTrunk, mFoliage] = treeMats(t, vars[vi].kit);
+        const pair = [
+          { geo: vars[vi].trunk, mat: mTrunk, shadow: true },
+          { geo: vars[vi].foliage, mat: mFoliage, shadow: true },
+        ];
+        // одинаковые матрицы для обеих частей — считаем один раз
+        const mats4 = [], cols = [];
+        for (const o of list) {
+          q.setFromAxisAngle(UP, o.rot);
+          sc.set(o.s * (0.9 + rnd() * 0.2), o.s, o.s * (0.9 + rnd() * 0.2));
+          v3.set(o.lx, o.y, o.lz);
+          mats4.push(m4.clone().compose(v3, q, sc));
+          const j = 0.85 + rnd() * 0.3;
+          cols.push(new THREE.Color(j, j * (0.96 + rnd() * 0.08), j * 0.97));
         }
-        im.instanceMatrix.needsUpdate = true;
-        if (im.instanceColor) im.instanceColor.needsUpdate = true;
-        im.castShadow = part.shadow;
-        im.receiveShadow = true;
-        im.computeBoundingSphere();
-        g.add(im);
+        for (const part of pair) {
+          const im = new THREE.InstancedMesh(part.geo, part.mat, list.length);
+          im.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+          for (let i = 0; i < list.length; i++) {
+            im.setMatrixAt(i, mats4[i]);
+            im.setColorAt(i, cols[i]);
+          }
+          im.instanceMatrix.needsUpdate = true;
+          if (im.instanceColor) im.instanceColor.needsUpdate = true;
+          im.castShadow = part.shadow;
+          im.receiveShadow = true;
+          im.computeBoundingSphere();
+          // подпись для отладки: сколько какой породы встало в чанк
+          im.userData.kind = t + (vars.length > 1 ? '-' + (vi + 1) : '');
+          g.add(im);
+        }
       }
     }
 
@@ -800,16 +946,41 @@ class Chunk {
     }
 
     /* --- кусты и папоротник --- */
-    const bushes = [], ferns = [];
+    // Сухие места и сырые получают разный подлесок. Из кита на каждую
+    // группу идёт по нескольку форм: один и тот же куст, повторённый
+    // шестнадцать раз на чанк, слишком заметно повторяется.
+    const dry = GEO.kitBush || [GEO.bush];
+    const wet = GEO.kitWet || [GEO.fern];
+    const bMat = GEO.kitBush ? MAT.kitLeaf : MAT.bush;
+    const wMat = GEO.kitWet ? MAT.kitLeaf : MAT.bush;
+    const sets = [];
+    for (const g of dry) sets.push({ geo: g, mat: bMat, list: [] });
+    for (const g of wet) sets.push({ geo: g, mat: wMat, list: [] });
+    const nDry = dry.length;
     for (let i = 0; i < CONFIG.bushesPerChunk; i++) {
       const lx = rnd() * CS, lz = rnd() * CS;
       const wx = this.baseX + lx, wz = this.baseZ + lz;
       if (isWater(wx, wz)) continue;
       const o = { lx, lz, y: terrainHeight(wx, wz), s: 0.7 + rnd() * 0.8, rot: rnd() * TAU };
-      (moisture(wx, wz) > 0.55 ? ferns : bushes).push(o);
+      const soggy = moisture(wx, wz) > 0.55;
+      const pool = soggy ? wet : dry;
+      sets[(soggy ? nDry : 0) + ((rnd() * pool.length) | 0)].list.push(o);
     }
-    for (const [list, geo, mat] of [[bushes, GEO.bush, MAT.bush], [ferns, GEO.fern, MAT.bush]]) {
-      if (!list.length) continue;
+    // Ромашки — только на полянах и опушках, в глухом ельнике их нет.
+    if (GEO.kitFlower) {
+      const fl = { geo: GEO.kitFlower, mat: MAT.kitLeaf, list: [] };
+      for (let i = 0; i < 14; i++) {
+        const lx = rnd() * CS, lz = rnd() * CS;
+        const wx = this.baseX + lx, wz = this.baseZ + lz;
+        if (isWater(wx, wz)) continue;
+        const b = forestType(wx, wz);
+        if (b !== FOREST.MEADOW && b !== FOREST.BEREZNYAK) continue;
+        fl.list.push({ lx, lz, y: terrainHeight(wx, wz), s: 0.7 + rnd() * 0.7, rot: rnd() * TAU });
+      }
+      sets.push(fl);
+    }
+    for (const { list, geo, mat } of sets) {
+      if (!list.length || !geo) continue;
       const im = new THREE.InstancedMesh(geo, mat, list.length);
       list.forEach((o, i) => {
         q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), o.rot);
@@ -848,7 +1019,8 @@ class Chunk {
 
     /* --- трава --- */
     const gn = CONFIG.quality === 'low' ? (CONFIG.grassPerChunk * 0.4) | 0 : CONFIG.grassPerChunk;
-    const gim = new THREE.InstancedMesh(GEO.grass, MAT.grass, gn);
+    const gim = new THREE.InstancedMesh(
+      GEO.kitGrassFar || GEO.grass, GEO.kitGrassFar ? MAT.kitGrass : MAT.grass, gn);
     let used = 0;
     for (let i = 0; i < gn; i++) {
       const lx = rnd() * CS, lz = rnd() * CS;
@@ -859,7 +1031,8 @@ class Chunk {
       q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), rnd() * TAU);
       gim.setMatrixAt(used, m4.compose(v3.set(lx, terrainHeight(wx, wz) - 0.03, lz), q, sc.set(s, s, s)));
       const j = 0.72 + rnd() * 0.56;
-      gim.setColorAt(used, tint.setRGB(j, j * (0.95 + rnd() * 0.12), j * 0.85));
+      const G = GEO.kitGrass ? KIT_GRASS_TINT : [1, 1, 1];
+      gim.setColorAt(used, tint.setRGB(j * G[0], j * (0.95 + rnd() * 0.12) * G[1], j * 0.85 * G[2]));
       used++;
     }
     gim.count = used;
@@ -905,13 +1078,15 @@ class Chunk {
 /* Напочвенный покров по выделам: [плешивость, высота, R, G, B].
    Ягель в бору низкий, густой и почти белый — по нему боровик и
    ищется; на поляне трава высокая и сухая, в низине тёмная. */
+/* Шестое число — доля клеток с ковриком клевера. В бору его нет: там
+   сплошной ягель, по которому и ищется боровик. */
 const NG_BIOME = [
-  [0.06, 0.55, 1.55, 1.52, 1.44],   // бор
-  [0.20, 1.05, 0.80, 1.02, 0.72],   // ельник
-  [0.22, 1.00, 1.00, 1.00, 1.00],   // березняк
-  [0.22, 1.00, 1.06, 1.02, 0.92],   // осинник
-  [0.18, 1.25, 1.18, 1.10, 0.70],   // поляна
-  [0.16, 1.12, 0.72, 0.96, 0.66],   // низина
+  [0.06, 0.55, 1.55, 1.52, 1.44, 0.00],   // бор
+  [0.20, 1.05, 0.80, 1.02, 0.72, 0.10],   // ельник
+  [0.22, 1.00, 1.00, 1.00, 1.00, 0.17],   // березняк
+  [0.22, 1.00, 1.06, 1.02, 0.92, 0.17],   // осинник
+  [0.18, 1.25, 1.18, 1.10, 0.70, 0.24],   // поляна
+  [0.16, 1.12, 0.72, 0.96, 0.66, 0.14],   // низина
 ];
 
 export class World {
@@ -1044,7 +1219,8 @@ export class World {
     initGeometries();
     this.ngR = CONFIG.quality === 'low' ? 20 : 29;
     const n = Math.ceil(Math.PI * this.ngR * this.ngR * 1.05);
-    this.nearGrass = new THREE.InstancedMesh(GEO.grass, MAT.grass, n);
+    this.nearGrass = new THREE.InstancedMesh(
+      GEO.kitGrass || GEO.grass, GEO.kitGrass ? MAT.kitGrass : MAT.grass, n);
     this.nearGrass.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     // Цвет травинок three завёл бы сам при первом setColorAt — но со
     // статическим флагом. Ковёр пересобирается каждые два метра хода,
@@ -1064,6 +1240,27 @@ export class World {
     this.nearMoss.count = 0;
     this.nearMoss.receiveShadow = true;
     this.scene.add(this.nearMoss);
+
+    // Ковёр клевера. Земля в игре — ровная зелёная заливка, и именно
+    // клевер под ногами превращает её в лесную подстилку. Коврик стоит
+    // четыре-пять треугольников, так что слой почти бесплатный; форм
+    // три, и меш на каждую, иначе повтор бьёт в глаза.
+    this.nearClover = [];
+    const cg = GEO.kitClover;
+    if (cg) {
+      const cap = Math.ceil(n * 0.3);
+      for (const g of cg) {
+        const im = new THREE.InstancedMesh(g, MAT.kitGrass, cap);
+        im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        im.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(cap * 3), 3);
+        im.instanceColor.setUsage(THREE.DynamicDrawUsage);
+        im.frustumCulled = false;
+        im.count = 0;
+        im.receiveShadow = true;
+        this.scene.add(im);
+        this.nearClover.push(im);
+      }
+    }
     this.nearGrass.frustumCulled = false;
     this.nearGrass.count = 0;
     this.scene.add(this.nearGrass);
@@ -1134,6 +1331,12 @@ export class World {
     const j0 = Math.floor(pz - R), j1 = Math.ceil(pz + R);
     let k = 0, mk = 0;
     const max = im.instanceMatrix.count;
+    const GT = GEO.kitGrass ? KIT_GRASS_TINT : [1, 1, 1];
+    const clov = this.nearClover;
+    const nClov = clov.length;
+    const ck = this._ngCk || (this._ngCk = []);
+    for (let c = 0; c < nClov; c++) ck[c] = 0;
+    const cMax = nClov ? clov[0].instanceMatrix.count : 0;
     for (let i = i0; i <= i1; i++) {
       for (let j = j0; j <= j1; j++) {
         const dx = i - px, dz = j - pz;
@@ -1150,6 +1353,33 @@ export class World {
         // В бору вместо травы сплошной ягель: низкий, густой и белёсый.
         const biome = forestType(wx, wz);
         const B = NG_BIOME[biome];
+
+        // Клевер кладётся до проверки на проплешины: там, где травы
+        // нет, голая земля видна сильнее всего, и коврик её как раз
+        // закрывает. Свой хеш — иначе клевер сядет ровно под траву.
+        if (nClov && B[5] > 0) {
+          const h2 = ((i * 83492791) ^ (j * 28613039)) >>> 0;
+          const c1 = (h2 & 1023) / 1023;
+          if (c1 < B[5]) {
+            const c2 = ((h2 >>> 10) & 1023) / 1023;
+            const c3 = ((h2 >>> 20) & 1023) / 1023;
+            const ci = (c2 * nClov) | 0;
+            const cm = clov[ci];
+            if (ck[ci] < cMax) {
+              const cs = 0.7 + c3 * 0.7;
+              q.setFromAxisAngle(this._ngAxis, c2 * TAU);
+              // чуть над землёй: коврик плоский, и на одном уровне с
+              // грунтом он мерцает от борьбы за глубину
+              v.set(wx, terrainHeight(wx, wz) + 0.015, wz);
+              sc.set(cs, 1, cs);
+              cm.setMatrixAt(ck[ci], m4.compose(v, q, sc));
+              const cj = 0.72 + c3 * 0.45;
+              cm.setColorAt(ck[ci], col.setRGB(cj * B[2] * 0.9, cj * B[3], cj * B[4] * 0.8));
+              ck[ci]++;
+            }
+          }
+        }
+
         if (r3 < B[0]) continue;                       // проплешины
         // не заслоняем грибы
         const spots = bare.get((i & 2047) * 2048 + (j & 2047));
@@ -1189,9 +1419,16 @@ export class World {
         }
 
         im.setMatrixAt(k, m4.compose(v, q, sc));
-        im.setColorAt(k, col.setRGB(jj * B[2], jj * (0.95 + r1 * 0.12) * B[3], jj * 0.82 * B[4]));
+        im.setColorAt(k, col.setRGB(
+          jj * B[2] * GT[0], jj * (0.95 + r1 * 0.12) * B[3] * GT[1], jj * 0.82 * B[4] * GT[2]));
         k++;
       }
+    }
+    for (let c = 0; c < nClov; c++) {
+      const cm = clov[c];
+      cm.count = ck[c];
+      cm.instanceMatrix.needsUpdate = true;
+      cm.instanceColor.needsUpdate = true;
     }
     im.count = k;
     im.instanceMatrix.needsUpdate = true;
