@@ -367,42 +367,56 @@ let uid = 1;
    тёмно-бурая шляпка и белёсая нога, как у боровика.
    ------------------------------------------------------------ */
 const MAT_SHROOM = new THREE.MeshStandardMaterial({
-  vertexColors: true, roughness: 0.9, metalness: 0.0,
+  vertexColors: true, color: 0xb98a5e, roughness: 0.85, metalness: 0,
 });
 
 /**
- * Красит модель по высоте: шляпка бурая, нога белёсая.
- * Меш в файле один и материал один, разделить по частям нечем — но
- * граница шляпки и ноги идёт ровно по горизонтали, и высоты вершины
- * достаточно. Сплошной светлый тон сливался с небом: трёхметровую
- * тварь в десяти шагах было не отличить от дальнего дерева.
+ * Текстуры хозяина.
+ *
+ * В самом FBX их нет — только ссылки на файлы, которых с моделью не
+ * прислали. Карты лежат отдельно и подключаются вручную: имена в
+ * файле и на диске всё равно не совпадают.
+ *
+ * Исходники были 2048 и весили 22 МБ на одно чудище — вшестеро больше
+ * всей остальной игры. Здесь они ужаты, затенение вмешано прямо в
+ * цвет (развёртка у модели одна, а aoMap в three ждёт вторую), металл
+ * выброшен: по карте он везде ноль.
+ *
+ * Пока карты едут, монстр стоит однотонно-бурый и игру не ломает.
  */
-function tintShroom(geo) {
-  const pos = geo.attributes.position;
-  geo.computeBoundingBox();
-  const bb = geo.boundingBox;
-  const top = bb.max.y, h = Math.max(1e-6, bb.max.y - bb.min.y);
-  const cap = new THREE.Color(0x5e3a1c);
-  const stem = new THREE.Color(0xd8cdae);
-  const c = new THREE.Color();
-  const arr = new Float32Array(pos.count * 3);
-  for (let i = 0; i < pos.count; i++) {
-    // верхняя треть — шляпка, ниже нога, между ними короткий переход
-    const t = clamp(((pos.getY(i) - (top - h * 0.42)) / (h * 0.14)), 0, 1);
-    c.copy(stem).lerp(cap, t);
-    arr[i * 3] = c.r; arr[i * 3 + 1] = c.g; arr[i * 3 + 2] = c.b;
-  }
-  geo.setAttribute('color', new THREE.BufferAttribute(arr, 3));
-  return geo;
+let shroomTexStarted = false;
+
+function loadShroomTextures() {
+  if (shroomTexStarted) return;
+  shroomTexStarted = true;
+  const L = new THREE.TextureLoader();
+  L.load('assets/shroom_color.jpg', (t) => {
+    t.colorSpace = THREE.SRGBColorSpace;
+    t.anisotropy = 4;
+    MAT_SHROOM.map = t;
+    MAT_SHROOM.color.set(0xffffff);       // цвет теперь из карты
+    MAT_SHROOM.needsUpdate = true;
+  }, undefined, () => console.info('[animals] текстур хозяина нет — остаётся однотонный'));
+  L.load('assets/shroom_normal.jpg', (t) => {
+    MAT_SHROOM.normalMap = t;
+    MAT_SHROOM.needsUpdate = true;
+  }, undefined, () => {});
+  L.load('assets/shroom_rough.jpg', (t) => {
+    MAT_SHROOM.roughnessMap = t;
+    MAT_SHROOM.needsUpdate = true;
+  }, undefined, () => {});
 }
 
 function buildShroom() {
   const g = new THREE.Group();
   const model = instance('shroom');
   if (model) {
+    loadShroomTextures();
     model.traverse((o) => {
       if (!o.isMesh) return;
-      tintShroom(o.geometry);
+      // белый вершинный цвет: материал общий с запаской, а она красится
+      // по вершинам — модель же должна показывать текстуру как есть
+      paint(o.geometry, 0xffffff);
       o.material = MAT_SHROOM;
     });
     g.add(model);

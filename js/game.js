@@ -108,6 +108,7 @@ export class Game {
     this.sched = {};
     this.tripT = 0;
     UI.setTrip(0, 0);        // на экран итогов приход тянуть незачем
+    Audio.tripStop();
     this.effects = [];          // активные бонусы от находок
     this.pending = [];          // звери, о которых уже предупредили
     this.deathSeq = null;       // замедление в момент гибели
@@ -253,6 +254,7 @@ export class Game {
     // и расцветает. Штраф за него и так есть, это сверх него.
     if (sp.id === 'mukhomor' || sp.id === 'mukhomor_big' || sp.id === 'panterny') {
       this.tripT = CONFIG.tripTime;
+      Audio.tripStart();
       UI.banner('МУХОМОР', 'Кажется, лес поплыл…', 3000, 'rare');
     }
 
@@ -974,6 +976,7 @@ export class Game {
     this.state = 'ended';
     this.tripT = 0;
     UI.setTrip(0, 0);
+    Audio.tripStop();
     UI.hideBag();
     this.player.releaseLock();
     Audio.stopAmbient();
@@ -1206,8 +1209,10 @@ export class Game {
       const tt = this.dayT;
       const wob = 1 + Math.sin(tt * 1.7) * 0.22 + Math.sin(tt * 0.41) * 0.14;
       UI.setTrip(clamp(k, 0, 1) * wob, (tt * 55) % 360);
+      if (this.tripT <= 0) Audio.tripStop();
     } else if (this._wasTrip) {
       UI.setTrip(0, 0);
+      Audio.tripStop();
     }
     this._wasTrip = this.tripT > 0;
 

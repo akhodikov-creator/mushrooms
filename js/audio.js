@@ -13,6 +13,15 @@ let ambientNodes = null;
 let birdTimer = 0;
 let started = false;
 
+/* Единственный звуковой файл в игре — музыка мухоморного прихода.
+   Всё остальное синтезируется на лету. Файла может и не быть: тогда
+   приход просто проходит молча, без ошибок в консоли. */
+const TRIP_URL = 'assets/trip.mp3';
+let tripEl = null;
+let tripGain = null;
+let tripOk = true;
+let tripPlaying = false;
+
 export const Audio = {
   init() {
     if (ctx) return;
@@ -181,6 +190,63 @@ export const Audio = {
       this.tone({ freq: 2600, to: 1300, dur: 0.3, type: 'square', gain: 0.09, delay: 0.2 });
       this.noise({ dur: 0.3, gain: 0.1, type: 'bandpass', freq: 4200, q: 6, delay: 0.05 });
     }
+  },
+
+  /**
+   * Музыка прихода. Идёт через общий регулятор громкости, поэтому
+   * ползунок в настройках на неё тоже действует.
+   */
+  tripStart() {
+    if (!this.ok || !tripOk || tripPlaying) return;
+    if (!tripEl) {
+      tripEl = new window.Audio(TRIP_URL);
+      tripEl.loop = true;                 // трек короче прихода — зациклим
+      tripEl.preload = 'auto';
+      tripEl.addEventListener('error', () => {
+        tripOk = false;
+        console.info(`[audio] ${TRIP_URL} нет — приход пройдёт молча`);
+      });
+      try {
+        tripGain = ctx.createGain();
+        tripGain.gain.value = 0;
+        ctx.createMediaElementSource(tripEl).connect(tripGain).connect(master);
+      } catch (e) {
+        tripOk = false;
+        return;
+      }
+    }
+    tripPlaying = true;
+    tripEl.currentTime = 0;
+    const pr = tripEl.play();
+    if (pr && pr.catch) pr.catch(() => { tripOk = false; tripPlaying = false; });
+    const t = ctx.currentTime;
+    tripGain.gain.cancelScheduledValues(t);
+    tripGain.gain.setValueAtTime(0.0001, t);
+    tripGain.gain.linearRampToValueAtTime(0.9, t + 1.2);
+  },
+
+  /** Состояние музыки прихода — для отладки из консоли. */
+  tripState() {
+    return {
+      ok: this.ok, tripOk, tripPlaying,
+      ctx: ctx ? ctx.state : 'нет',
+      el: tripEl ? {
+        paused: tripEl.paused, t: +tripEl.currentTime.toFixed(2),
+        ready: tripEl.readyState, dur: +(tripEl.duration || 0).toFixed(1),
+        err: tripEl.error ? tripEl.error.code : null,
+      } : 'не создан',
+      gain: tripGain ? +tripGain.gain.value.toFixed(3) : 'нет',
+    };
+  },
+
+  tripStop() {
+    if (!tripEl || !tripGain || !tripPlaying) return;
+    tripPlaying = false;
+    const t = ctx.currentTime;
+    tripGain.gain.cancelScheduledValues(t);
+    tripGain.gain.setValueAtTime(tripGain.gain.value, t);
+    tripGain.gain.linearRampToValueAtTime(0.0001, t + 2.0);
+    setTimeout(() => { if (tripEl && !tripPlaying) tripEl.pause(); }, 2200);
   },
 
   /** Хозяин поднимается: низкий гул и шелест спор. */
