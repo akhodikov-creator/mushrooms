@@ -3,7 +3,7 @@ import { mergeParts } from './geo.js';
 import { CONFIG } from './config.js';
 import {
   WS, TAU, rng, terrainHeight, terrainSlope, moisture, isWater, WATER_LEVEL,
-  wrapDelta, wrapCoord, clamp, lerp, dampTo, torusDist2,
+  wrapDelta, wrapCoord, clamp, lerp, dampTo, torusDist2, forestType, FOREST,
 } from './utils.js';
 import {
   generateChunkMushrooms, getMushroomGeometry, SPECIES, GEO_VARIANTS,
@@ -72,6 +72,10 @@ const MAT = {
     vertexColors: true, map: leafTex(), alphaTest: 0.42,
     side: THREE.DoubleSide,
   }), 0.014, 1.5),
+  // Ягель — не трава: плотная белёсая подушка без прозрачности и без
+  // колыхания на ветру. Отдельный материал нужен именно поэтому:
+  // под зелёной текстурой травы белый мох белым не читается.
+  moss: new THREE.MeshLambertMaterial({ vertexColors: true }),
   grass: addWind(new THREE.MeshLambertMaterial({
     vertexColors: true, map: grassTex(), alphaTest: 0.4,
     side: THREE.DoubleSide,
@@ -251,6 +255,24 @@ function buildAspen() {
 }
 
 /** Пучок травы: скрещённые квады с текстурой травинок. */
+/** Подушка ягеля: приплюснутый комок с неровными боками. */
+function buildMossPad() {
+  const g = new THREE.IcosahedronGeometry(0.17, 0);
+  const p = g.attributes.position;
+  // Только шевелим вершины: обрубать нижнюю половину нельзя, грани
+  // схлопываются и нормали уходят в никуда — подушки чернеют.
+  for (let i = 0; i < p.count; i++) {
+    const n = 0.74 + ((Math.sin(i * 12.9898) * 43758.5453) % 1) * 0.5;
+    p.setXYZ(i, p.getX(i) * n, p.getY(i) * n, p.getZ(i) * n);
+  }
+  g.scale(1, 0.72, 1);
+  g.translate(0, 0.085, 0);
+  g.computeVertexNormals();
+  // Белый вершинный цвет обязателен: материал объявлен vertexColors,
+  // и без атрибута WebGL подставляет чёрный — подушки выходят углями.
+  return paint(g, 0xffffff);
+}
+
 function buildGrassTuft() {
   const p = [];
   for (let i = 0; i < 3; i++) {
@@ -357,6 +379,7 @@ function initGeometries() {
   GEO.birch = buildBirch();
   GEO.aspen = buildAspen();
   GEO.grass = buildGrassTuft();
+  GEO.moss = buildMossPad();
   GEO.fern = buildFern();
   GEO.bush = buildBush();
   GEO.rock = buildRock();
@@ -572,10 +595,17 @@ class Chunk {
       const slope = terrainSlope(wx, wz);
       // цвет несёт текстура, вершины только подкрашивают — иначе
       // тёмный оттенок умножается на тёмную текстуру и земля чернеет
+      const biome = forestType(wx, wz);
       if (h < WATER_LEVEL + 1.1) c.setRGB(1.05, 0.9, 0.66);     // ил у воды
+      // Бор-беломошник должно быть видно издалека: по белому мху
+      // игрок и понимает, что тут стоит искать боровики. Проверяем
+      // раньше склона — иначе песчаная грива красится как обрыв.
+      else if (biome === FOREST.BOR) c.setRGB(1.34, 1.32, 1.18);
       else if (slope > 0.42) c.setRGB(1.0, 0.86, 0.62);         // склон, обнажённая земля
-      else if (wet > 0.6) c.setRGB(0.72, 0.9, 0.62);            // сырой мох
-      else if (wet < 0.32) c.setRGB(1.15, 1.1, 0.78);           // сухая поляна
+      else if (biome === FOREST.BOLOTO) c.setRGB(0.66, 0.84, 0.6);
+      else if (biome === FOREST.ELNIK) c.setRGB(0.74, 0.92, 0.64);
+      else if (biome === FOREST.MEADOW) c.setRGB(1.15, 1.1, 0.78);
+      else if (biome === FOREST.OSINNIK) c.setRGB(1.0, 1.0, 0.74);
       else c.setRGB(0.92, 1.0, 0.8);
       const j = 0.9 + rnd() * 0.2;
       colArr[i * 3] = c.r * j; colArr[i * 3 + 1] = c.g * j; colArr[i * 3 + 2] = c.b * j;
@@ -608,8 +638,10 @@ class Chunk {
       const lx = rnd() * CS, lz = rnd() * CS;
       const wx = this.baseX + lx, wz = this.baseZ + lz;
       if (isWater(wx, wz)) continue;
-      const wet = moisture(wx, wz);
-      if (wet < 0.3 && rnd() < 0.72) continue;                  // поляны остаются открытыми
+      const biome = forestType(wx, wz);
+      // Бор стоит редко и светло, на поляне почти пусто, в ельнике густо.
+      const thin = [0.42, 0.06, 0.16, 0.2, 0.78, 0.5][biome];
+      if (rnd() < thin) continue;
       if (terrainSlope(wx, wz) > 0.6) continue;
       // Вокруг приёмного пункта — поляна. Иначе ель вырастает прямо
       // в кузове «Буханки» и заслоняет весь лагерь.
@@ -618,11 +650,17 @@ class Chunk {
         if (torusDist2(wx, wz, cp.x, cp.z) < 12 * 12) { atCamp = true; break; }
       }
       if (atCamp) continue;
-      let t;
+      // порода по выделу: [сосна, ель, берёза] — остаток уходит осине
+      const mix = [
+        [0.90, 0.95, 1.00],   // бор
+        [0.06, 0.78, 0.92],   // ельник
+        [0.08, 0.26, 0.86],   // березняк
+        [0.04, 0.18, 0.46],   // осинник
+        [0.30, 0.40, 0.82],   // поляна
+        [0.05, 0.55, 0.88],   // низина
+      ][biome];
       const r = rnd();
-      if (wet > 0.62) t = r < 0.55 ? 'spruce' : r < 0.8 ? 'birch' : 'aspen';
-      else if (wet < 0.42) t = r < 0.6 ? 'pine' : r < 0.85 ? 'birch' : 'aspen';
-      else t = r < 0.34 ? 'pine' : r < 0.6 ? 'spruce' : r < 0.85 ? 'birch' : 'aspen';
+      const t = r < mix[0] ? 'pine' : r < mix[1] ? 'spruce' : r < mix[2] ? 'birch' : 'aspen';
       const s = 0.72 + rnd() * 0.62;
       byType[t].push({ lx, lz, y: terrainHeight(wx, wz), s, rot: rnd() * TAU });
       this.treeCols.push(lx, lz, 0.34 * s + 0.2);
@@ -817,6 +855,18 @@ class Chunk {
 /* ============================================================
    Мир
    ============================================================ */
+/* Напочвенный покров по выделам: [плешивость, высота, R, G, B].
+   Ягель в бору низкий, густой и почти белый — по нему боровик и
+   ищется; на поляне трава высокая и сухая, в низине тёмная. */
+const NG_BIOME = [
+  [0.06, 0.55, 1.55, 1.52, 1.44],   // бор
+  [0.20, 1.05, 0.80, 1.02, 0.72],   // ельник
+  [0.22, 1.00, 1.00, 1.00, 1.00],   // березняк
+  [0.22, 1.00, 1.06, 1.02, 0.92],   // осинник
+  [0.18, 1.25, 1.18, 1.10, 0.70],   // поляна
+  [0.16, 1.12, 0.72, 0.96, 0.66],   // низина
+];
+
 export class World {
   constructor(scene) {
     this.scene = scene;
@@ -954,6 +1004,17 @@ export class World {
     this.nearGrass.instanceColor =
       new THREE.InstancedBufferAttribute(new Float32Array(n * 3), 3);
     this.nearGrass.instanceColor.setUsage(THREE.DynamicDrawUsage);
+
+    // Ковёр ягеля — второй такой же, только в борах вместо травы
+    this.nearMoss = new THREE.InstancedMesh(GEO.moss, MAT.moss, n);
+    this.nearMoss.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.nearMoss.instanceColor =
+      new THREE.InstancedBufferAttribute(new Float32Array(n * 3), 3);
+    this.nearMoss.instanceColor.setUsage(THREE.DynamicDrawUsage);
+    this.nearMoss.frustumCulled = false;
+    this.nearMoss.count = 0;
+    this.nearMoss.receiveShadow = true;
+    this.scene.add(this.nearMoss);
     this.nearGrass.frustumCulled = false;
     this.nearGrass.count = 0;
     this.scene.add(this.nearGrass);
@@ -964,6 +1025,7 @@ export class World {
     this._ngS = new THREE.Vector3();
     this._ngC = new THREE.Color();
     this._ngAxis = new THREE.Vector3(0, 1, 0);
+    this._ngTilt = new THREE.Euler();
   }
 
   /**
@@ -1017,10 +1079,11 @@ export class World {
     const R = this.ngR, R2 = R * R;
     const bare = this._bareSpots(px, pz, R);
     const im = this.nearGrass;
+    const mo = this.nearMoss;
     const m4 = this._ngM, q = this._ngQ, v = this._ngV, sc = this._ngS, col = this._ngC;
     const i0 = Math.floor(px - R), i1 = Math.ceil(px + R);
     const j0 = Math.floor(pz - R), j1 = Math.ceil(pz + R);
-    let k = 0;
+    let k = 0, mk = 0;
     const max = im.instanceMatrix.count;
     for (let i = i0; i <= i1; i++) {
       for (let j = j0; j <= j1; j++) {
@@ -1032,9 +1095,13 @@ export class World {
         const r1 = (h & 1023) / 1023;
         const r2 = ((h >>> 10) & 1023) / 1023;
         const r3 = ((h >>> 20) & 1023) / 1023;
-        if (r3 < 0.22) continue;                       // проплешины
         const wx = i + r1, wz = j + r2;
         if (isWater(wx, wz)) continue;
+        // [плешивость, высота, красный, зелёный, синий]
+        // В бору вместо травы сплошной ягель: низкий, густой и белёсый.
+        const biome = forestType(wx, wz);
+        const B = NG_BIOME[biome];
+        if (r3 < B[0]) continue;                       // проплешины
         // не заслоняем грибы
         const spots = bare.get((i & 2047) * 2048 + (j & 2047));
         if (spots) {
@@ -1046,19 +1113,43 @@ export class World {
           if (blocked) continue;
         }
         const wet = moisture(wx, wz);
-        const s = (wet < 0.34 ? 1.3 : 0.95) * (0.65 + r3 * 0.8);
+        const s = (wet < 0.34 ? 1.3 : 0.95) * (0.65 + r3 * 0.8) * B[1];
         q.setFromAxisAngle(this._ngAxis, r1 * TAU);
         v.set(wx, terrainHeight(wx, wz) - 0.03, wz);
         sc.set(s, s, s);
-        im.setMatrixAt(k, m4.compose(v, q, sc));
         const jj = 0.7 + r2 * 0.6;
-        im.setColorAt(k, col.setRGB(jj, jj * (0.95 + r1 * 0.12), jj * 0.82));
+
+        if (biome === FOREST.BOR) {
+          // В бору землю кроет ягель, а не трава. Подушки лежат НА
+          // земле и перекрывают друг друга: травинку можно утопить,
+          // а редкие плоские комки читаются клочками бумаги, а не мхом.
+          const sm = 0.65 + r3 * 0.8;
+          v.y = terrainHeight(wx, wz) + 0.01;
+          sc.set(sm * 2.8, sm * 1.4, sm * 2.8);
+          // лёгкий завал набок: строго горизонтальные комки читаются
+          // разбросанными листами бумаги
+          this._ngTilt.set((r2 - 0.5) * 0.5, r1 * TAU, (r1 - 0.5) * 0.5);
+          q.setFromEuler(this._ngTilt);
+          mo.setMatrixAt(mk, m4.compose(v, q, sc));
+          q.setFromAxisAngle(this._ngAxis, r1 * TAU);
+          // не белый лист, а белёсо-зелёный мох
+          const g0 = 0.80 + r2 * 0.16;
+          mo.setColorAt(mk, col.setRGB(g0 * 0.97, g0, g0 * 0.86));
+          mk++;
+          continue;
+        }
+
+        im.setMatrixAt(k, m4.compose(v, q, sc));
+        im.setColorAt(k, col.setRGB(jj * B[2], jj * (0.95 + r1 * 0.12) * B[3], jj * 0.82 * B[4]));
         k++;
       }
     }
     im.count = k;
     im.instanceMatrix.needsUpdate = true;
-    if (im.instanceColor) im.instanceColor.needsUpdate = true;
+    im.instanceColor.needsUpdate = true;
+    mo.count = mk;
+    mo.instanceMatrix.needsUpdate = true;
+    mo.instanceColor.needsUpdate = true;
   }
 
   _buildSky() {

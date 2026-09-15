@@ -18,7 +18,7 @@ export const UI = {
       'sens', 'sens-val', 'vol', 'vol-val', 'quality', 'vignette', 'end-sub', 'threat-ring',
       'level-num', 'level-fill', 'buffs', 'threat-arrow', 'radar-label', 'now-cue',
       'bag', 'bag-body', 'bag-cap', 'weather', 'lamp',
-      'buyer-say', 'buyer-say-text', 'perf',
+      'buyer-say', 'buyer-say-text', 'perf', 'day-label',
     ];
     for (const id of ids) this.el[id] = $(id);
     this.radarCtx = this.el.radar ? this.el.radar.getContext('2d') : null;
@@ -191,6 +191,11 @@ export const UI = {
       setTimeout(() => d.remove(), 400);
     }, 2300);
     while (this.el.toasts.children.length > 7) this.el.toasts.firstChild.remove();
+  },
+
+  /** Лес дня на стартовом экране: он общий для всех, кто играет сегодня. */
+  setDayLabel(text) {
+    if (this.el['day-label']) this.el['day-label'].textContent = 'лес на ' + text + ' — у всех одинаковый';
   },
 
   /** Реплика скупщика по центру экрана. */

@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { mergeParts } from './geo.js';
 import { CONFIG } from './config.js';
-import { rng, terrainHeight, moisture, isWater, clamp, TAU } from './utils.js';
+import { rng, terrainHeight, moisture, isWater, clamp, TAU, forestType } from './utils.js';
 import { capTex } from './textures.js';
 
 /* ============================================================
@@ -351,17 +351,53 @@ export function applyMushroomEnv(env) {
    ------------------------------------------------------------ */
 const totalW = SPECIES.reduce((a, s) => a + s.weight, 0);
 
+/* ============================================================
+   Где какой гриб растёт.
+
+   Порядок весов: бор, ельник, березняк, осинник, поляна, низина.
+   Раскладка не выдумана: боровик берёт сосновый бор-беломошник и
+   ельник, подосиновик идёт за осиной, подберёзовик и груздь — за
+   берёзой, маслёнок и рыжик — в сосняк, шампиньон и зонтик — на
+   открытое место, опята и вешенка — на пни, а бледная поганка
+   держится лиственного леса.
+   ============================================================ */
+const BIOME_W = {
+  bely:          [3.4, 2.4, 1.5, 0.7, 0.12, 0.25],
+  tsar:          [3.2, 2.6, 1.3, 0.6, 0.08, 0.2],
+  podosinovik:   [0.3, 0.6, 1.6, 4.2, 0.2, 0.5],
+  podberezovik:  [0.7, 0.7, 4.0, 1.5, 0.45, 0.7],
+  ryzhik:        [3.0, 2.3, 0.4, 0.3, 0.2, 0.2],
+  lisichka:      [1.1, 2.6, 1.5, 0.9, 0.12, 0.9],
+  gruzd:         [0.25, 0.7, 3.4, 1.2, 0.2, 0.5],
+  maslenok:      [3.8, 0.7, 0.3, 0.2, 0.5, 0.2],
+  mokhovik:      [1.2, 2.0, 1.1, 0.9, 0.2, 1.8],
+  openok:        [0.6, 1.0, 1.6, 1.5, 0.2, 0.8],
+  veshenka:      [0.3, 0.7, 1.6, 1.6, 0.1, 0.6],
+  syroezhka:     [1.0, 1.0, 1.2, 1.1, 0.5, 0.8],
+  shampinion:    [0.2, 0.1, 0.3, 0.2, 4.0, 0.1],
+  zontik:        [0.4, 0.2, 0.8, 0.5, 3.0, 0.15],
+  dozhdevik:     [0.5, 0.5, 1.0, 0.7, 2.2, 0.4],
+  mukhomor:      [0.8, 2.0, 2.2, 1.2, 0.2, 0.5],
+  mukhomor_big:  [0.7, 2.0, 2.2, 1.1, 0.2, 0.4],
+  poganka:       [0.2, 0.7, 2.4, 1.5, 0.15, 0.4],
+  satanic:       [0.5, 0.2, 1.0, 0.5, 0.6, 0.1],
+  lozhnyi:       [0.6, 1.0, 1.5, 1.4, 0.2, 0.7],
+  panterny:      [0.8, 1.2, 1.6, 1.0, 0.2, 0.4],
+};
+
 export function pickSpecies(rnd, x, z, nearStump, openMeadow) {
   const wet = moisture(x, z);
+  const biome = forestType(x, z);
   let acc = 0;
   const weights = SPECIES.map((s) => {
     let w = s.weight;
-    // совпадение по влажности
-    w *= 1.25 - Math.abs(wet - (s.wet ?? 0.5)) * 1.35;
-    if (s.onStump) w *= nearStump ? 5.5 : 0.06;
-    if (s.meadow) w *= openMeadow ? 3.4 : 0.35;
-    if (!s.meadow && openMeadow) w *= 0.7;
-    w = Math.max(0.001, w);
+    // главное — выдел: под какое дерево гриб ходит
+    const b = BIOME_W[s.id];
+    w *= b ? b[biome] : 1;
+    // влажность доуточняет внутри выдела
+    w *= 1.15 - Math.abs(wet - (s.wet ?? 0.5)) * 0.9;
+    if (s.onStump) w *= nearStump ? 6.5 : 0.04;
+    w = Math.max(0.0005, w);
     acc += w;
     return w;
   });

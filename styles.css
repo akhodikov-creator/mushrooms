@@ -467,6 +467,8 @@ ul.keys em{color:var(--gold);font-style:normal}
   text-shadow:0 0 44px rgba(255,190,60,.75),0 4px 26px rgba(0,0,0,.9);
 }
 
+.sub.day{color:var(--gold);opacity:.85;font-size:12px;margin-top:2px}
+
 /* Счётчик кадров (F3) */
 .perf{
   position:absolute;left:10px;top:10px;padding:7px 10px;
