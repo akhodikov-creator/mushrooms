@@ -106,6 +106,8 @@ export class Game {
 
     // расписание режиссёра
     this.sched = {};
+    this.tripT = 0;
+    UI.setTrip(0, 0);        // на экран итогов приход тянуть незачем
     this.effects = [];          // активные бонусы от находок
     this.pending = [];          // звери, о которых уже предупредили
     this.deathSeq = null;       // замедление в момент гибели
@@ -247,6 +249,13 @@ export class Game {
     const r = this.inv.add(sp);
     this.bestMult = Math.max(this.bestMult, this.inv.totalMult);
 
+    // Мухомор — он и в жизни не яд, а глюк: на полминуты мир плывёт
+    // и расцветает. Штраф за него и так есть, это сверх него.
+    if (sp.id === 'mukhomor' || sp.id === 'mukhomor_big' || sp.id === 'panterny') {
+      this.tripT = CONFIG.tripTime;
+      UI.banner('МУХОМОР', 'Кажется, лес поплыл…', 3000, 'rare');
+    }
+
     if (r.poison) {
       Audio.bad();
       UI.toast(`<b>${sp.name}</b> <s>${fmtNum(sp.price)}</s> <i>серия сброшена</i>`, 'bad');
@@ -257,6 +266,7 @@ export class Game {
     } else {
       Audio.pickup(this.inv.streak);
       if (sp.rare) Audio.rare();
+      if (sp.id === 'bely' || sp.id === 'tsar') Audio.moan();
       const tag = sp.tag ? ` <i>${sp.tag}</i>` : '';
       UI.toast(
         `<b>${sp.name}</b> +${fmtNum(r.gained)}${this.inv.combo > 1.01 ? ` <em>×${r.mult.toFixed(2)}</em>` : ''}${tag}`,
@@ -581,7 +591,38 @@ export class Game {
       UI.banner('¡OLÉ!', `${a.k.name} мимо · +${fmtNum(bonus)} · множитель растёт`, 1500, 'ole');
     };
 
+    /* Хозяин запустил лапу в тару. Он не бьёт и не убивает — он
+       отбирает собранное, и это куда неприятнее: на десятой минуте
+       несёшь больше всего, а до конца две минуты. */
+    A.onSteal = (boss) => {
+      const r = this.inv.rob(boss.k.grabTake, boss.k.grabMin);
+      boss.meals = (boss.meals || 0) + 1;
+      boss.loot = (boss.loot || 0) + r.value;
+      this.shake = 0.8;
+      Audio.hit(false);
+      this.player.vx -= Math.sin(boss.dir) * 6;
+      this.player.vz -= Math.cos(boss.dir) * 6;
+      if (r.items > 0) {
+        UI.banner('ХОЗЯИН ЗАЛЕЗ В ТАРУ', `Выгреб ${r.items} шт. — беги или стреляй`, 2600, 'bad');
+        UI.toast(`Потеряно <s>${fmtNum(r.value)}</s>`, 'bad');
+      } else {
+        UI.toast('Хозяин пошарил в пустой таре и обиделся', 'warn');
+      }
+    };
+
     A.onKill = (a) => {
+      if (a.k.boss) {
+        // всё съеденное вываливается обратно, плюс премия за наглость
+        const back = Math.round(a.loot || 0);
+        this.inv.addBonus(a.k.bonus + back);
+        this.inv.kills++;
+        this._gainXp(120);
+        UI.banner('ХОЗЯИН ПОВЕРЖЕН',
+          back > 0 ? `+${fmtNum(a.k.bonus)} и ${fmtNum(back)} обратно из брюха`
+            : `+${fmtNum(a.k.bonus)}`, 3400, 'good');
+        Audio.dayEnd();
+        return;
+      }
       this.inv.addBonus(a.k.bonus);
       this.inv.kills++;
       this._gainXp({
@@ -624,6 +665,21 @@ export class Game {
     const t = this.dayT;
     const S = this.sched;
     const p = this.player;
+
+    // --- 5:00 и за 2 минуты до заката — хозяин бора ---
+    for (const [key, at] of [['boss1', 300], ['boss2', CONFIG.dayLength - 120]]) {
+      if (S[key] || t < at) continue;
+      S[key] = true;
+      const a = Math.random() * Math.PI * 2;
+      const d = 24;
+      let bx = p.x + Math.cos(a) * d, bz = p.z + Math.sin(a) * d;
+      if (isWater(bx, bz)) { bx = p.x - Math.cos(a) * d; bz = p.z - Math.sin(a) * d; }
+      this.animals.spawn('shroom', bx, bz);
+      this.shake = 1.1;
+      Audio.shroom();
+      UI.banner('ХОЗЯИН БОРА ПОДНЯЛСЯ',
+        'Ему нужны не ты, а твоя тара. Уклонение не поможет', 4200, 'bad');
+    }
 
     // --- 3:00 — находка ТТ ---
     if (!S.pistol && t >= CONFIG.pistolTime) {
@@ -916,6 +972,8 @@ export class Game {
   async _end(died, reason) {
     if (this.state === 'ended') return;
     this.state = 'ended';
+    this.tripT = 0;
+    UI.setTrip(0, 0);
     UI.hideBag();
     this.player.releaseLock();
     Audio.stopAmbient();
@@ -1096,6 +1154,13 @@ export class Game {
         ? `${charging.k.name} ГОТОВИТСЯ  ·  ПРОБЕЛ — В СТОРОНУ`
         : `${charging.k.name} ИДЁТ НА ТАРАН`;
     }
+    // Хозяина рывком не обмануть — и подпись поэтому другая: она
+    // говорит не «уклоняйся», а «беги или стреляй».
+    if (!dangerText) {
+      const boss = this.animals.list.find((a) => a.k.boss && !a.dead && a.dist < 26);
+      if (boss) dangerText = `${boss.k.name} ИДЁТ ЗА ТАРОЙ  ·  РЫВОК НЕ СПАСЁТ`;
+    }
+
     // угол на зверя относительно взгляда — для стрелки на экране
     let threatAngle = null;
     if (charging) {
@@ -1132,6 +1197,19 @@ export class Game {
     UI.setBuffs(this.effects);
     UI.updateRadar(p, CAMPS, this.animals.list, this.pickups.list, this.radarRange || 130);
     UI.setBiome(FOREST_NAME[forestType(p.x, p.z)]);
+
+    // приход: нарастает за секунду, держится, гаснет за три
+    if (this.tripT > 0) {
+      this.tripT = Math.max(0, this.tripT - raw);
+      const left = this.tripT, full = CONFIG.tripTime;
+      const k = Math.min(1, (full - left) / 1.0, left / 3.0);
+      const tt = this.dayT;
+      const wob = 1 + Math.sin(tt * 1.7) * 0.22 + Math.sin(tt * 0.41) * 0.14;
+      UI.setTrip(clamp(k, 0, 1) * wob, (tt * 55) % 360);
+    } else if (this._wasTrip) {
+      UI.setTrip(0, 0);
+    }
+    this._wasTrip = this.tripT > 0;
 
     // --- конец дня ---
     if (left <= 0) this._end(false, 'Солнце село. Ты дошёл до вечера живым.');

@@ -587,7 +587,7 @@ export class Weapons {
       Audio.knifeSwing();
       const t = this.animals.meleeTarget(origin, dir, 2.5, 0.55);
       if (t) {
-        const killed = t.damage(52, false);
+        const killed = t.damage(52, false, 'knife');
         this.animals.bloodBurst(t.x, t.g.position.y + t.k.radius, t.z, 12);
         Audio.hit(true);
         onHit?.({ animal: t, killed, weapon: 'knife', headshot: false });
@@ -623,7 +623,7 @@ export class Weapons {
 
     if (hit) {
       const a = hit.animal;
-      const killed = a.damage(hit.headshot ? 74 : 62, hit.headshot);
+      const killed = a.damage(hit.headshot ? 74 : 62, hit.headshot, 'pistol');
       this.animals.bloodBurst(
         a.x, hit.point.y, a.z, hit.headshot ? 22 : 14, hit.headshot ? 0xb01414 : 0x8a1010);
       onHit?.({ animal: a, killed, weapon: 'pistol', headshot: hit.headshot });

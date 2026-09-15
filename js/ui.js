@@ -193,6 +193,23 @@ export const UI = {
     while (this.el.toasts.children.length > 7) this.el.toasts.firstChild.remove();
   },
 
+  /**
+   * Мухоморный приход: сила 0..1, оттенок крутится сам.
+   * Вызывается каждый кадр, пока действует.
+   */
+  setTrip(k, hue) {
+    const c = this.el.canvas || (this.el.canvas = document.getElementById('c'));
+    if (!c) return;
+    if (k <= 0.001) {
+      if (this._trip) { c.style.filter = ''; this._trip = false; }
+      return;
+    }
+    this._trip = true;
+    c.style.filter =
+      `blur(${(k * 3.2).toFixed(2)}px) saturate(${(1 + k * 2.6).toFixed(2)}) ` +
+      `contrast(${(1 + k * 0.35).toFixed(2)}) hue-rotate(${Math.round(hue)}deg)`;
+  },
+
   /** Какой лес под ногами — подпись под радаром. */
   setBiome(name) {
     if (this._biome === name) return;          // в DOM пишем только на смене

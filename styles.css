@@ -478,6 +478,10 @@ ul.keys em{color:var(--gold);font-style:normal}
 .sub.day{color:var(--gold);opacity:.85;font-size:12px;margin-top:2px}
 .sub.demand{color:#9fe05a;opacity:.9;font-size:12px;margin-top:1px}
 
+/* Мухоморный приход собирается в js (UI.setTrip): строку фильтра
+   пишем в style напрямую. Через var() в calc() не вышло — браузер
+   уходил в запасное значение и фильтр оставался пустым. */
+
 /* Счётчик кадров (F3) */
 .perf{
   position:absolute;left:10px;top:10px;padding:7px 10px;

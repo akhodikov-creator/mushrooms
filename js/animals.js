@@ -6,6 +6,8 @@ import {
   TAU, terrainHeight, wrapCoord, wrapDelta, clamp, lerp, dampTo, isWater, WATER_LEVEL,
 } from './utils.js';
 import { furTex, scaleTex } from './textures.js';
+import { clone as skeletonClone } from 'three/addons/utils/SkeletonUtils.js';
+import { instance, onAsset } from './assets.js';
 
 /* ============================================================
    Материалы зверей: шерсть рисуется в canvas, поэтому силуэт
@@ -356,6 +358,72 @@ export const KINDS = {
 
 let uid = 1;
 
+/* ------------------------------------------------------------
+   Хозяин бора — грибной великан.
+
+   Модель скачанная; если её нет, собирается запаска из шляпки на
+   ножке, чтобы игра не сломалась. Своего материала у модели не
+   доезжает (в FBX текстуры остались ссылками), поэтому красим сами:
+   тёмно-бурая шляпка и белёсая нога, как у боровика.
+   ------------------------------------------------------------ */
+const MAT_SHROOM = new THREE.MeshStandardMaterial({
+  vertexColors: true, roughness: 0.9, metalness: 0.0,
+});
+
+/**
+ * Красит модель по высоте: шляпка бурая, нога белёсая.
+ * Меш в файле один и материал один, разделить по частям нечем — но
+ * граница шляпки и ноги идёт ровно по горизонтали, и высоты вершины
+ * достаточно. Сплошной светлый тон сливался с небом: трёхметровую
+ * тварь в десяти шагах было не отличить от дальнего дерева.
+ */
+function tintShroom(geo) {
+  const pos = geo.attributes.position;
+  geo.computeBoundingBox();
+  const bb = geo.boundingBox;
+  const top = bb.max.y, h = Math.max(1e-6, bb.max.y - bb.min.y);
+  const cap = new THREE.Color(0x5e3a1c);
+  const stem = new THREE.Color(0xd8cdae);
+  const c = new THREE.Color();
+  const arr = new Float32Array(pos.count * 3);
+  for (let i = 0; i < pos.count; i++) {
+    // верхняя треть — шляпка, ниже нога, между ними короткий переход
+    const t = clamp(((pos.getY(i) - (top - h * 0.42)) / (h * 0.14)), 0, 1);
+    c.copy(stem).lerp(cap, t);
+    arr[i * 3] = c.r; arr[i * 3 + 1] = c.g; arr[i * 3 + 2] = c.b;
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(arr, 3));
+  return geo;
+}
+
+function buildShroom() {
+  const g = new THREE.Group();
+  const model = instance('shroom');
+  if (model) {
+    model.traverse((o) => {
+      if (!o.isMesh) return;
+      tintShroom(o.geometry);
+      o.material = MAT_SHROOM;
+    });
+    g.add(model);
+  } else {
+    const p = [];
+    const stem = new THREE.CylinderGeometry(0.42, 0.62, 2.1, 12);
+    stem.translate(0, 1.05, 0);
+    p.push(paint(stem, 0xe6dcc0));
+    const cap = new THREE.SphereGeometry(1.5, 16, 10, 0, TAU, 0, Math.PI / 2);
+    cap.scale(1, 0.62, 1);
+    cap.translate(0, 2.1, 0);
+    p.push(paint(cap, 0x7a4a26));
+    g.add(new THREE.Mesh(mergeParts(p), MAT_SHROOM));
+  }
+  // «голова» — шляпка: по ней и считаются точные попадания
+  const head = new THREE.Group();
+  head.position.set(0, 2.6, 0);
+  g.add(head);
+  return { g, head, legs: [], bodyMesh: g.children[0] };
+}
+
 /* ============================================================
    Прототипы зверей.
 
@@ -374,6 +442,8 @@ function protoOf(kindId) {
     p.head.name = 'head';
     p.bodyMesh.name = 'body';
     p.legs.forEach((l, i) => { l.name = 'leg' + i; });
+    p.skinned = false;
+    p.g.traverse((o) => { if (o.isSkinnedMesh) p.skinned = true; });
     protos.set(kindId, p);
   }
   return p;
@@ -381,7 +451,10 @@ function protoOf(kindId) {
 
 function modelOf(kindId) {
   const p = protoOf(kindId);
-  const g = p.g.clone(true);
+  // Обычный clone() у скиннутого меша оставляет кости в оригинале:
+  // прототип в сцену не добавлен, и тварь рисуется в начале координат,
+  // за сотни метров от игрока. Для таких есть SkeletonUtils.
+  const g = p.skinned ? skeletonClone(p.g) : p.g.clone(true);
   return {
     g,
     head: g.getObjectByName('head'),
@@ -399,6 +472,34 @@ function modelOf(kindId) {
 export function animalWarmupModels() {
   return Object.keys(KINDS).map((id) => modelOf(id).g);
 }
+
+/* Хозяин бора. Не зверь: не разгоняется, не уклоняется, не убивает —
+   отбирает собранное. Живёт по своему автомату, см. _updateBoss. */
+/* Размах бедра и во сколько радиан фазы обходится метр пути.
+   Ноги у хозяина короткие, шаг выходит около 0,8 м — отсюда и число. */
+const BOSS_STRIDE = 0.85;
+const GAIT_PER_M = Math.PI / 0.8;
+
+const BOSS_BONES = [
+  'thighL', 'thighR', 'shinL', 'shinR', 'footL', 'footR',
+  'upper_armL', 'upper_armR', 'forearmL', 'forearmR', 'spine002',
+];
+
+KINDS.shroom = {
+  name: 'ХОЗЯИН БОРА', build: buildShroom, hp: 10, scale: 1.0,
+  boss: true,
+  walkSpeed: 4.25,        // быстрее шага игрока, медленнее спринта
+  grabRange: 3.2,
+  grabTake: 0.35,         // какую долю тары выгребает за раз
+  grabMin: 3,
+  life: 78,               // сколько держится, если не убить
+  radius: 1.5, headY: 2.7,
+  bonus: 2600, sound: 'bear',
+  damage: 0, instakill: false,
+  // Без этого в шкалу опасности уходит NaN: threatLevel умножает
+  // близость на aggroMusic, а у хозяина её не было.
+  aggroMusic: 0.85,
+};
 
 class Animal {
   constructor(kindId, x, z, mgr) {
@@ -425,6 +526,16 @@ class Animal {
 
     const m = modelOf(kindId);
     this.g = m.g;
+    // У хозяина настоящий риг (бёдра, колени, плечи), и шагает он
+    // костями: трёхметровая туша, скользящая по траве, читается как
+    // ошибка, а не как чудище.
+    if (this.k.boss) {
+      this.bone = {};
+      for (const n of BOSS_BONES) {
+        const b = m.g.getObjectByName(n);
+        if (b) { b.userData.rest = b.rotation.x; this.bone[n] = b; }
+      }
+    }
     this.head = m.head;
     this.legs = m.legs;
     this.bodyMesh = m.bodyMesh;
@@ -438,7 +549,17 @@ class Animal {
     this.mgr.root.remove(this.g);
   }
 
-  damage(amount, headshot) {
+  damage(amount, headshot, weapon) {
+    // Хозяин считает не урон, а попадания: десять в тулово, пять в
+    // шляпу. Нож по великану вдвое выше медведя — так, царапина.
+    if (this.k.boss) {
+      if (this.dead) return false;
+      this.hp -= headshot ? 2 : (weapon === 'knife' ? 0.25 : 1);
+      this.flash = 0.12;
+      Audio.hit(headshot);
+      if (this.hp <= 0) { this.die(); return true; }
+      return false;
+    }
     if (this.dead) return false;
     this.hp -= amount * (headshot ? 2.6 : 1);
     this.flash = 0.16;
@@ -466,7 +587,138 @@ class Animal {
     return [this.x - Math.sin(this.dir) * s, this.z - Math.cos(this.dir) * s];
   }
 
+  /**
+   * Хозяин бора.
+   *
+   * Зверь — это коррида: разгон по прямой и рывок в последний момент.
+   * Хозяин так не умеет вообще, и в этом весь смысл: он не бегает,
+   * его нельзя обмануть уклонением, он всегда знает, где ты, и не
+   * устаёт. Зато он и не убивает — он запускает лапу в тару и
+   * выгребает собранное. Угроза не жизни, а урожаю: беги сдавать
+   * или стой и стреляй.
+   */
+  /**
+   * Походка хозяина костями рига.
+   * Ось сгиба у скачанного рига заранее не известна; подобрана по
+   * виду сбоку, как в своё время ось пальцев у кистей.
+   */
+  _poseBoss() {
+    const B = this.bone;
+    if (!B) return;
+    const walking = this.state === 'walk';
+    const grabbing = this.state === 'grab';
+    const ph = walking ? (this.gait || 0) : this.animT * 1.2;
+    const sw = walking ? BOSS_STRIDE : 0.07;
+    const set = (n, v) => { const b = B[n]; if (b) b.rotation.x = (b.userData.rest || 0) + v; };
+
+    const l = Math.sin(ph), r = Math.sin(ph + Math.PI);
+    set('thighL', l * sw);
+    set('thighR', r * sw);
+    // колено гнётся только назад, и сильнее всего в момент подъёма ноги
+    set('shinL', Math.max(0, -l) * sw * 1.5);
+    set('shinR', Math.max(0, -r) * sw * 1.5);
+    set('footL', -Math.max(0, -l) * sw * 0.7);
+    set('footR', -Math.max(0, -r) * sw * 0.7);
+
+    // руки маятником навстречу ногам, а в замахе тянутся к таре
+    const reach = grabbing ? Math.sin(Math.min(1, this.t / 1.1) * Math.PI) : 0;
+    set('upper_armL', r * sw * 0.55 - reach * 1.5);
+    set('upper_armR', l * sw * 0.55 - reach * 1.5);
+    set('forearmL', -reach * 0.8);
+    set('forearmR', -reach * 0.8);
+    set('spine002', Math.sin(ph * 2) * (walking ? 0.05 : 0.02) + reach * 0.35);
+  }
+
+  _updateBoss(dt, player, mgr) {
+    this.animT += dt;
+    if (this.flash > 0) this.flash -= dt;
+    this.t += dt;
+    this.age = (this.age || 0) + dt;
+
+    const dx = wrapDelta(player.x - this.x);
+    const dz = wrapDelta(player.z - this.z);
+    const dist = Math.hypot(dx, dz);
+    this.dir = Math.atan2(-dx, -dz);
+
+    const k = this.k;
+    const grow = 1 + (this.meals || 0) * 0.09;      // с каждой кражи крупнее
+
+    switch (this.state) {
+      case 'spawn': {                                // вырастает из земли
+        const t = Math.min(1, this.t / 2.2);
+        this.rise = t;
+        if (!this.greeted) { this.greeted = true; Audio.shroom(); }
+        if (t >= 1) { this.state = 'walk'; this.t = 0; }
+        break;
+      }
+      case 'walk': {
+        const sp = k.walkSpeed * (1 + (this.meals || 0) * 0.06);
+        this.x = wrapCoord(this.x + (dx / (dist || 1)) * sp * dt);
+        this.z = wrapCoord(this.z + (dz / (dist || 1)) * sp * dt);
+        // Фазу шага крутим пройденным путём, а не временем: иначе ноги
+        // живут своей жизнью и туша едет по траве, как на коньках.
+        this.gait = (this.gait || 0) + sp * dt * GAIT_PER_M;
+        if (dist < k.grabRange) { this.state = 'grab'; this.t = 0; }
+        else if (this.age > k.life) { this.state = 'sink'; this.t = 0; }
+        break;
+      }
+      case 'grab': {                                 // замах и хват
+        if (this.t > 0.55 && !this.took) {
+          this.took = true;
+          Audio.shroomGrab();
+          mgr.onSteal?.(this);
+        }
+        if (this.t > 1.1) { this.state = 'chew'; this.t = 0; this.took = false; }
+        break;
+      }
+      case 'chew': {                                 // жуёт и отходит
+        const back = 2.2 * dt;
+        this.x = wrapCoord(this.x - (dx / (dist || 1)) * back);
+        this.z = wrapCoord(this.z - (dz / (dist || 1)) * back);
+        if (this.t > 2.8) {
+          this.state = this.age > k.life ? 'sink' : 'walk';
+          this.t = 0;
+        }
+        break;
+      }
+      case 'sink': {                                 // уходит обратно в землю
+        this.rise = Math.max(0, 1 - this.t / 1.8);
+        if (this.t > 1.8) {
+          this.dead = true;
+          this.fade = 0;
+          this.remove = true;            // список чистит менеджер
+          mgr.onLeave?.(this);
+        }
+        break;
+      }
+      case 'dead': {
+        this.fade -= dt * 0.55;
+        if (this.fade <= 0) { this.fade = 0; this.remove = true; }
+        break;
+      }
+    }
+
+    // посадка на рельеф + «подъём из земли» прячем под землю
+    this.y = terrainHeight(this.x, this.z);
+    const hide = (1 - (this.rise ?? 1)) * 3.4;
+    this.g.position.set(
+      player.x + wrapDelta(this.x - player.x),
+      this.y - hide + (this.state === 'dead' ? -(1 - this.fade) * 2.5 : 0),
+      player.z + wrapDelta(this.z - player.z)
+    );
+    this.g.rotation.y = this.dir;
+    const sway = this.state === 'walk' ? Math.sin(this.animT * 3.4) * 0.06 : 0;
+    this.g.rotation.z = sway;
+    const lunge = this.state === 'grab' ? Math.sin(Math.min(1, this.t / 1.1) * Math.PI) * 0.5 : 0;
+    this.g.rotation.x = lunge;
+    this.g.scale.setScalar(grow);
+    this._poseBoss();
+    this.dist = dist;          // им пользуются радар и шкала опасности
+    return dist;
+  }
+
   update(dt, player, mgr) {
+    if (this.k.boss) return this._updateBoss(dt, player, mgr);
     this.animT += dt;
     if (this.flash > 0) this.flash -= dt;
 
@@ -785,6 +1037,7 @@ export class AnimalManager {
 
   update(dt, player) {
     for (const a of this.list) a.update(dt, player, this);
+
 
     // выкладываем зверей вокруг игрока с учётом зацикливания
     for (const a of this.list) {

@@ -121,6 +121,33 @@ export class Inventory {
   }
 
   /** Сдача в приёмном пункте. Возвращает отчёт или null. */
+  /**
+   * Хозяин выгреб часть тары. Возвращает, сколько унёс.
+   * Серия и множитель сбрасываются: собирать придётся заново.
+   */
+  rob(share, min) {
+    if (this.items <= 0) return { items: 0, value: 0 };
+    const items = Math.max(min, Math.round(this.items * share));
+    const take = Math.min(this.items, items);
+    const value = this.carryValue * (take / this.items);
+    this.items -= take;
+    this.carryValue = Math.max(0, this.carryValue - value);
+    this.robbed = (this.robbed || 0) + take;
+    this.streak = 0;
+    this.combo = 1;
+    this.comboT = 0;
+    // из сумки вычитаем по видам, чтобы список не врал
+    let left = take;
+    for (const id of Object.keys(this.bag)) {
+      if (left <= 0) break;
+      const n = Math.min(this.bag[id], left);
+      this.bag[id] -= n;
+      left -= n;
+      if (this.bag[id] <= 0) delete this.bag[id];
+    }
+    return { items: take, value };
+  }
+
   deliver() {
     if (this.items <= 0) return null;
     const value = this.carryValue;

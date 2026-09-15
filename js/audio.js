@@ -98,6 +98,52 @@ export const Audio = {
     this.noise({ dur: 0.05, gain: 0.05, type: 'bandpass', freq: 2400, q: 2 });
   },
 
+  /**
+   * Стон удовольствия на белом грибе.
+   *
+   * Голос синтезируем формантами: две полосы шума на частотах «а» и
+   * «о» плюс тон с вибрато. Файлов в игре нет принципиально, а так
+   * получается достаточно похоже, чтобы было смешно.
+   */
+  moan() {
+    if (!this.ok) return;
+    const t0 = ctx.currentTime;
+    const dur = 1.35;
+
+    const out = ctx.createGain();
+    out.gain.setValueAtTime(0.0001, t0);
+    out.gain.exponentialRampToValueAtTime(0.17, t0 + 0.22);
+    out.gain.setValueAtTime(0.17, t0 + dur * 0.55);
+    out.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    out.connect(master);
+
+    // основной тон: снизу вверх и обратно, с дрожью
+    const osc = ctx.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(210, t0);
+    osc.frequency.exponentialRampToValueAtTime(330, t0 + dur * 0.45);
+    osc.frequency.exponentialRampToValueAtTime(190, t0 + dur);
+    const vib = ctx.createOscillator();
+    vib.frequency.value = 5.4;
+    const vibGain = ctx.createGain();
+    vibGain.gain.value = 11;
+    vib.connect(vibGain).connect(osc.frequency);
+
+    // форманты делают из пилы голос, а не сирену
+    for (const [f, q, g] of [[720, 7, 1.0], [1150, 9, 0.7], [2600, 11, 0.25]]) {
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.value = f;
+      bp.Q.value = q;
+      const gn = ctx.createGain();
+      gn.gain.value = g;
+      osc.connect(bp).connect(gn).connect(out);
+    }
+
+    osc.start(t0); vib.start(t0);
+    osc.stop(t0 + dur + 0.05); vib.stop(t0 + dur + 0.05);
+  },
+
   rare() {
     [0, 0.08, 0.17].forEach((d, i) => this.tone({ freq: 620 * (1 + i * 0.32), dur: 0.3, type: 'sine', gain: 0.16, delay: d }));
   },
@@ -135,6 +181,19 @@ export const Audio = {
       this.tone({ freq: 2600, to: 1300, dur: 0.3, type: 'square', gain: 0.09, delay: 0.2 });
       this.noise({ dur: 0.3, gain: 0.1, type: 'bandpass', freq: 4200, q: 6, delay: 0.05 });
     }
+  },
+
+  /** Хозяин поднимается: низкий гул и шелест спор. */
+  shroom() {
+    this.tone({ freq: 62, to: 34, dur: 1.5, type: 'sawtooth', gain: 0.24 });
+    this.tone({ freq: 94, to: 47, dur: 1.2, type: 'triangle', gain: 0.14, delay: 0.06 });
+    this.noise({ dur: 1.1, gain: 0.1, type: 'lowpass', freq: 520, sweepTo: 140, delay: 0.12 });
+  },
+
+  /** Запустил лапу в тару. */
+  shroomGrab() {
+    this.noise({ dur: 0.35, gain: 0.16, type: 'bandpass', freq: 380, q: 1.4, sweepTo: 120 });
+    this.tone({ freq: 88, to: 52, dur: 0.4, type: 'square', gain: 0.1 });
   },
 
   splash() {
