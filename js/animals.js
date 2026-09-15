@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { mergeParts } from './geo.js';
-import { CONFIG } from './config.js';
+import { CONFIG, ASSETS } from './config.js';
 import { Audio } from './audio.js';
 import {
   TAU, terrainHeight, wrapCoord, wrapDelta, clamp, lerp, dampTo, isWater, WATER_LEVEL,
@@ -86,6 +86,62 @@ function limb(len, rTop, rBot, col) {
 /* ============================================================
    МОДЕЛИ. Ориентация: «вперёд» у всех зверей — это -Z.
    ============================================================ */
+
+/**
+ * Медведь — Копатыч.
+ *
+ * Модель со скелетом и тремя клипами из Mixamo. Пока файл не приехал,
+ * работает прежний процедурный медведь: он и остаётся запаской, так
+ * что сломать зверя ненадёжной сетью нельзя.
+ */
+function buildKopatych() {
+  const model = instance('kopatych');
+  if (!model) return buildBear();
+  const g = new THREE.Group();
+  model.traverse((o) => {
+    if (!o.isMesh && !o.isSkinnedMesh) return;
+    o.castShadow = true;
+    // Отсечение пирамидой видимости для скиннутого меша считается по
+    // габариту позы покоя, а зверь из неё выходит — в замахе рука
+    // вылезает наружу, и меш моргает. Пусть рисуется всегда.
+    o.frustumCulled = false;
+  });
+  g.add(model);
+  const head = new THREE.Group();
+  head.position.set(0, 1.3, 0);      // по ней считаются точные попадания
+  g.add(head);
+  return { g, head, legs: [], bodyMesh: g.children[0] };
+}
+
+/** Кабан: покупная модель с текстурой, запаска — прежний из шаров. */
+function buildBoarModel() {
+  const model = instance('boar');
+  if (!model) return buildBoar();
+  const g = new THREE.Group();
+  const tex = boarTexture();
+  model.traverse((o) => {
+    if (!o.isMesh) return;
+    o.castShadow = true;
+    o.material = tex;
+  });
+  g.add(model);
+  const head = new THREE.Group();
+  head.position.set(0, 0.8, -0.72);
+  g.add(head);
+  return { g, head, legs: [], bodyMesh: g.children[0] };
+}
+
+let MAT_BOAR = null;
+function boarTexture() {
+  if (MAT_BOAR) return MAT_BOAR;
+  const t = new THREE.TextureLoader().load(ASSETS.boar.tex);
+  t.colorSpace = THREE.SRGBColorSpace;
+  // развёртка приехала из glb, а там начало отсчёта сверху
+  t.flipY = false;
+  t.anisotropy = 4;
+  MAT_BOAR = new THREE.MeshStandardMaterial({ map: t, roughness: 0.92, metalness: 0 });
+  return MAT_BOAR;
+}
 
 function buildBear() {
   const g = new THREE.Group();
@@ -327,14 +383,28 @@ function buildHarius() {
    ============================================================ */
 export const KINDS = {
   bear: {
-    name: 'МЕДВЕДЬ', build: buildBear, hp: 330, scale: 1.0,
+    name: 'МЕДВЕДЬ', build: buildKopatych, hp: 330, scale: 1.0,
     approach: 4.6, chargeSpeed: 15.6, telegraph: 1.3, chargeTime: 1.55,
     recover: 1.5, radius: 0.95, maxCharges: 4, instakill: true, damage: 999,
-    lockDist: 11.0, chargeTurn: 1.9, engageRange: 17, sound: 'bear', headY: 1.2, bonus: CONFIG.killBonusBear,
+    lockDist: 11.0, chargeTurn: 1.9, engageRange: 17, sound: 'bear', headY: 1.3, bonus: CONFIG.killBonusBear,
     corrida: true, aggroMusic: 1.0,
+    // Ходит не шарнирами, а костями: слот с клипами и что играть в
+    // каком состоянии — [клип, скорость].
+    //
+    // Бег и шаг взяты от хозяина бора: у всех ригов Mixamo кости зовутся
+    // одинаково, и клип ложится на чужой скелет как родной. Своего бега
+    // у медведя нет — скачанный «Running Jump» оказался прыжком, зверь
+    // на нём отрывался от земли и плыл по воздуху.
+    clips: 'kopatych',
+    clipMap: {
+      spawn: ['sprint', 0.35], approach: ['walk', 1.1], telegraph: ['attack', 1.0],
+      charge: ['sprint', 1.35], recover: ['walk', 0.7], leave: ['sprint', 0.55],
+      dead: ['death', 1.0],
+    },
+    clipOnce: ['death'],
   },
   boar: {
-    name: 'КАБАН', build: buildBoar, hp: 150, scale: 1.0,
+    name: 'КАБАН', build: buildBoarModel, hp: 150, scale: 1.0,
     approach: 5.4, chargeSpeed: 14.2, telegraph: 0.85, chargeTime: 1.3,
     recover: 1.1, radius: 0.7, maxCharges: 5, instakill: false, damage: 58,
     lockDist: 9.0, chargeTurn: 2.4, engageRange: 14, sound: 'boar', headY: 0.8, bonus: CONFIG.killBonusBoar,
@@ -537,10 +607,13 @@ class Animal {
     // У хозяина настоящий риг (бёдра, колени, плечи), и шагает он
     // костями: трёхметровая туша, скользящая по траве, читается как
     // ошибка, а не как чудище.
-    if (this.k.boss) {
-      // Клипы из Mixamo: своя ходьба, рывок, прыжок с ударом и кража.
-      // Микшер у каждого свой — скелет-то тоже свой, клонированный.
-      const clips = animationsOf('shroom');
+    // Клипы из Mixamo. Микшер у каждого зверя свой — скелет-то тоже
+    // свой, клонированный. Слот задаётся в KINDS: у хозяина бора это
+    // «shroom», у медведя «kopatych». Если файл не приехал, клипов
+    // не будет, и зверь останется на процедурной анимации.
+    const slot = this.k.clips || (this.k.boss ? 'shroom' : null);
+    if (slot) {
+      const clips = animationsOf(slot);
       if (clips.length) {
         this.mixer = new THREE.AnimationMixer(m.g);
         this.act = {};
@@ -549,10 +622,11 @@ class Animal {
           a.enabled = true;
           this.act[c.name] = a;
         }
-        for (const once of ['jump', 'steal']) {
-          if (this.act[once]) {
-            this.act[once].setLoop(THREE.LoopOnce, 1);
-            this.act[once].clampWhenFinished = true;
+        const once = this.k.clipOnce || ['jump', 'steal'];
+        for (const nm of once) {
+          if (this.act[nm]) {
+            this.act[nm].setLoop(THREE.LoopOnce, 1);
+            this.act[nm].clampWhenFinished = true;
           }
         }
       }
@@ -620,7 +694,15 @@ class Animal {
    */
   /** Переключить клип с перекрёстным затуханием. */
   _play(name, fade = 0.25, speed = 1) {
-    if (!this.act || !this.act[name] || this.clip === name) return;
+    if (!this.act || !this.act[name]) return;
+    if (this.clip === name) {
+      // Тот же клип, но темп другой: у медведя и подход, и отход — это
+      // «run», просто с разной скоростью. Перезапускать его ради этого
+      // нельзя, зверь дёргался бы на каждом переходе.
+      const cur = this.act[name];
+      if (Math.abs(cur.timeScale - speed) > 1e-3) cur.timeScale = speed;
+      return;
+    }
     const next = this.act[name];
     next.reset();
     next.timeScale = speed;
@@ -926,30 +1008,51 @@ class Animal {
 
     // ---- анимация ----
     const running = moveSpeed > 1;
-    const rate = this.state === 'charge' ? 15 : running ? 7.5 : 2.2;
-    const amp = this.state === 'charge' ? 0.95 : running ? 0.62 : 0.12;
-    this.legs.forEach((l, i) => {
-      const ph = (i < 2 ? 0 : Math.PI) + (i % 2) * Math.PI;
-      l.rotation.x = Math.sin(this.animT * rate + ph) * amp;
-    });
-
-    if (this.state === 'dead') {
-      this.g.rotation.z = lerp(this.g.rotation.z, Math.PI * 0.42, Math.min(1, dt * 4));
-      this.g.position.y = this.y - 0.15;
-    } else {
+    if (this.mixer) {
+      // Зверь со скелетом: позу задаёт клип, а не синусы по шарнирам.
+      // Падать на бок вручную тоже не надо — на смерть есть свой клип.
+      this.mixer.update(dt);
+      const c = (this.k.clipMap && this.k.clipMap[this.state]) || ['run', 1];
+      this._play(c[0], this.state === 'dead' ? 0.1 : 0.22, c[1]);
       this.g.rotation.z = 0;
-      const bodyBob = Math.sin(this.animT * rate * 0.5) * (running ? 0.05 : 0.012);
-      this.g.position.y = this.y + bodyBob + (this.k.jumper ? this.jumpY : 0);
-    }
+      this.g.position.y = this.y;
+    } else {
+      const rate = this.state === 'charge' ? 15 : running ? 7.5 : 2.2;
+      const amp = this.state === 'charge' ? 0.95 : running ? 0.62 : 0.12;
+      this.legs.forEach((l, i) => {
+        const ph = (i < 2 ? 0 : Math.PI) + (i % 2) * Math.PI;
+        l.rotation.x = Math.sin(this.animT * rate + ph) * amp;
+      });
 
-    if (this.k.jumper) {
-      // хариус вращается и хлопает в полёте — тот самый кринж
-      this.g.rotation.x = Math.sin(this.animT * 9) * 0.5 - (this.jumpY > 0.1 ? 0.35 : 0);
-      this.bodyMesh.rotation.z = Math.sin(this.animT * 16) * 0.32;
-    } else if (this.head) {
-      this.head.rotation.x = this.state === 'telegraph'
-        ? Math.sin(this.animT * 20) * 0.14 - 0.2
-        : Math.sin(this.animT * rate * 0.5) * 0.06;
+      if (this.state === 'dead') {
+        this.g.rotation.z = lerp(this.g.rotation.z, Math.PI * 0.42, Math.min(1, dt * 4));
+        this.g.position.y = this.y - 0.15;
+      } else {
+        this.g.rotation.z = 0;
+        const bodyBob = Math.sin(this.animT * rate * 0.5) * (running ? 0.05 : 0.012);
+        this.g.position.y = this.y + bodyBob + (this.k.jumper ? this.jumpY : 0);
+      }
+
+      // Покупная модель приходит одним куском: шарниров нет, ногами не
+      // подвигать. Галоп изображаем наклоном и подскоком всего корпуса —
+      // на скорости тарана этого хватает, чтобы туша не «ехала» по траве.
+      // Крутим не саму группу, а модель внутри: на группе висит курс.
+      if (!this.k.jumper && !this.legs.length && this.bodyMesh) {
+        const gal = Math.sin(this.animT * rate);
+        this.bodyMesh.rotation.x = gal * (running ? 0.12 : 0.015);
+        this.bodyMesh.position.y = Math.abs(Math.sin(this.animT * rate * 0.5))
+          * (running ? 0.09 : 0.008);
+      }
+
+      if (this.k.jumper) {
+        // хариус вращается и хлопает в полёте — тот самый кринж
+        this.g.rotation.x = Math.sin(this.animT * 9) * 0.5 - (this.jumpY > 0.1 ? 0.35 : 0);
+        this.bodyMesh.rotation.z = Math.sin(this.animT * 16) * 0.32;
+      } else if (this.head) {
+        this.head.rotation.x = this.state === 'telegraph'
+          ? Math.sin(this.animT * 20) * 0.14 - 0.2
+          : Math.sin(this.animT * rate * 0.5) * 0.06;
+      }
     }
 
     // телеграф: зверь «раздувается» и роет землю

@@ -15,6 +15,7 @@
    ?raw=1 — не подменять материалы на нейтральный, показать свои. */
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { onAsset, instance } from './js/assets.js';
 
 const q = new URLSearchParams(location.search);
@@ -81,8 +82,13 @@ if (slot) {
     }
   }, 15000);
 } else {
-  new GLTFLoader().load(url || 'assets/feet.glb', (g) => show(g.scene, url),
-    undefined, (e) => { document.getElementById('l').textContent = 'ошибка: ' + e; });
+  const u = url || 'assets/feet.glb';
+  const fail = (e) => { document.getElementById('l').textContent = 'ошибка: ' + e; };
+  if (/\.fbx(\?|$)/i.test(u)) {
+    new FBXLoader().load(u, (o) => show(o, u), undefined, fail);
+  } else {
+    new GLTFLoader().load(u, (g) => show(g.scene, u), undefined, fail);
+  }
 }
 
 function draw() {

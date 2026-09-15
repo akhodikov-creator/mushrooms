@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><base href="../"><title>mesh prep</title>
+<style>html,body{margin:0;background:#191d23;color:#9fb;font:12px/1.5 monospace}
+#log{padding:6px 8px;white-space:pre-wrap}canvas{display:block}</style>
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.168.0/build/three.module.js",
+"three/addons/":"https://cdn.jsdelivr.net/npm/three@0.168.0/examples/jsm/"}}
+</script></head><body>
+<div id="log">гружу…</div><canvas id="c"></canvas>
+<script type="module">
+/* Чужая модель -> компактный .glb для игры.
+
+   Скачанные модели почти всегда приезжают со сценой вокруг: пол на
+   двести единиц, куб, камера, лампа. Плюс единицы не те, ориентация
+   не та, а текстура лежит в .tga на семь мегабайт и по абсолютному
+   пути с чужого диска.
+
+   Открывать с порта tools/serve.py — результат уходит запросом PUT.
+
+   ?url=      исходник (.fbx / .obj / .glb)
+   ?drop=     имена мешей на выброс, через запятую (подстрока сойдёт)
+   ?keep=     наоборот: оставить только эти
+   ?tex=      показать эту картинку в предпросмотре (путь в проекте)
+   ?embed=1   зашить картинку внутрь .glb; по умолчанию нет — экспортёр
+              перекодирует её в png, и 137 КБ webp превращаются в 2.5 МБ.
+              Без этого игра вешает текстуру сама, как на растения
+   ?height=   привести к такому росту в метрах
+   ?rotY=     довернуть вокруг вертикали, в градусах
+   ?ground=1  опустить подошвами на ноль и отцентровать по горизонтали
+   ?flat=0    не пересчитывать нормали (по умолчанию пересчитываются)
+   ?out=      куда положить .glb
+*/
+import * as THREE from 'three';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
+
+const q = new URLSearchParams(location.search);
+const URL_ = q.get('url') || '';
+const DROP = (q.get('drop') || '').split(',').map((s) => s.trim()).filter(Boolean);
+const KEEP = (q.get('keep') || '').split(',').map((s) => s.trim()).filter(Boolean);
+const TEX = q.get('tex') || '';
+const HEIGHT = +(q.get('height') || 0);
+const ROTY = (+(q.get('rotY') || 0)) * Math.PI / 180;
+const GROUND = q.get('ground') !== '0';
+const FLAT = q.get('flat') !== '0';
+const EMBED = q.get('embed') === '1';
+const OUT = q.get('out') || 'assets/mesh.glb';
+const log = (t) => { document.getElementById('log').textContent += '\n' + t; };
+
+const load = (u) => {
+  if (/\.fbx(\?|$)/i.test(u)) return new FBXLoader().loadAsync(u);
+  if (/\.obj(\?|$)/i.test(u)) return new OBJLoader().loadAsync(u);
+  return new GLTFLoader().loadAsync(u).then((g) => g.scene);
+};
+
+(async () => {
+  if (!URL_) { document.getElementById('log').textContent = 'задай ?url='; return; }
+  const root = await load(URL_);
+  root.updateWorldMatrix(true, true);
+
+  const hit = (n) => (KEEP.length
+    ? KEEP.some((k) => n.includes(k))
+    : !DROP.some((d) => n.includes(d)));
+
+  // Геометрию собираем в мировых координатах: у чужих файлов на узлах
+  // висят повороты и масштабы, и тащить их в игру незачем.
+  const keep = [];
+  root.traverse((o) => {
+    if (!o.isMesh) return;
+    if (!hit(o.name)) { log('выброшен ' + o.name); return; }
+    const g = o.geometry.clone();
+    g.applyMatrix4(o.matrixWorld);
+    keep.push({ name: o.name, geo: g, mat: Array.isArray(o.material) ? o.material[0] : o.material });
+  });
+  if (!keep.length) { log('ОШИБКА: ничего не осталось'); return; }
+  log('оставлено: ' + keep.map((k) => k.name).join(', '));
+
+  const tex = TEX ? await new THREE.TextureLoader().loadAsync(TEX) : null;
+  if (tex) { tex.colorSpace = THREE.SRGBColorSpace; tex.flipY = false; }
+
+  const group = new THREE.Group();
+  for (const k of keep) {
+    let g = k.geo;
+    if (FLAT) { g.deleteAttribute('normal'); g = mergeVertices(g, 1e-5); g.computeVertexNormals(); }
+    const src = k.mat;
+    const mat = new THREE.MeshStandardMaterial({
+      name: k.name,
+      color: tex ? 0xffffff : (src && src.color ? src.color.clone() : new THREE.Color(0xb0b0b0)),
+      map: EMBED ? (tex || (src && src.map) || null) : null,
+      roughness: 0.9, metalness: 0,
+    });
+    const mesh = new THREE.Mesh(g, mat);
+    mesh.name = k.name;
+    mesh.userData.preview = tex;     // показать, но не зашивать
+    group.add(mesh);
+  }
+
+  // порядок важен: сперва доворот, потом посадка на землю
+  if (ROTY) { group.rotation.y = ROTY; group.updateMatrixWorld(true); }
+  const bake = new THREE.Group();
+  for (const m of group.children.slice()) {
+    m.updateWorldMatrix(true, false);
+    m.geometry.applyMatrix4(m.matrixWorld);
+    m.position.set(0, 0, 0); m.rotation.set(0, 0, 0); m.scale.set(1, 1, 1);
+    bake.add(m);
+  }
+
+  let box = new THREE.Box3().setFromObject(bake);
+  let size = box.getSize(new THREE.Vector3());
+  log('как в файле: ' + [size.x, size.y, size.z].map((v) => v.toFixed(2)).join(' x '));
+  const k = HEIGHT > 0 ? HEIGHT / size.y : 1;
+  const dx = GROUND ? -(box.min.x + box.max.x) / 2 : 0;
+  const dy = GROUND ? -box.min.y : 0;
+  const dz = GROUND ? -(box.min.z + box.max.z) / 2 : 0;
+  for (const m of bake.children) {
+    m.geometry.translate(dx, dy, dz);
+    if (k !== 1) m.geometry.scale(k, k, k);
+    m.geometry.computeBoundingBox();
+    m.geometry.computeBoundingSphere();
+  }
+  box = new THREE.Box3().setFromObject(bake);
+  size = box.getSize(new THREE.Vector3());
+  log('в игру: ' + [size.x, size.y, size.z].map((v) => v.toFixed(2)).join(' x ') +
+      ', низ y=' + box.min.y.toFixed(3));
+  let tris = 0;
+  bake.traverse((o) => {
+    if (o.isMesh) tris += (o.geometry.index ? o.geometry.index.count : o.geometry.attributes.position.count) / 3;
+  });
+  log('мешей ' + bake.children.length + ', треугольников ' + tris);
+
+  // Сначала выгрузка, потом предпросмотр: предпросмотр вешает текстуру
+  // на материалы, и экспортёр зашил бы её в файл мимо ?embed.
+  const glb = await new Promise((ok, no) =>
+    new GLTFExporter().parse(bake, ok, no, { binary: true }));
+  const r = await fetch('/' + OUT, { method: 'PUT', body: new Blob([glb]) });
+  log(OUT + ': ' + r.status + ' ' + (await r.text()) + ' (' + (glb.byteLength / 1024).toFixed(0) + ' КБ)');
+  if (!EMBED && TEX) log('текстура в файл НЕ зашита — вешать в игре: ' + TEX);
+
+  view(bake, box);
+  window.__ready = true;
+})();
+
+function view(obj, box) {
+  // в предпросмотре текстуру показываем всегда, даже когда в .glb её нет
+  obj.traverse((o) => {
+    if (o.isMesh && o.userData.preview && !o.material.map) {
+      o.material = o.material.clone();
+      o.material.map = o.userData.preview;
+      o.material.color.setHex(0xffffff);
+    }
+  });
+  const W = 840, H = 300;
+  const sc = new THREE.Scene();
+  sc.background = new THREE.Color(0x191d23);
+  sc.add(new THREE.HemisphereLight(0xffffff, 0x445566, 2.0));
+  const d = new THREE.DirectionalLight(0xffffff, 2.0); d.position.set(0.7, 1, 0.6); sc.add(d);
+  const d2 = new THREE.DirectionalLight(0xffffff, 0.7); d2.position.set(-0.6, 0.3, -0.7); sc.add(d2);
+  sc.add(obj);
+  const c = box.getCenter(new THREE.Vector3());
+  const R = Math.max(...box.getSize(new THREE.Vector3()).toArray()) * 1.2;
+  const grid = new THREE.GridHelper(R * 2.4, 12, 0x50606e, 0x2c353d);
+  grid.position.y = box.min.y; sc.add(grid);
+  const cv = document.getElementById('c');
+  const r = new THREE.WebGLRenderer({ canvas: cv, antialias: true, preserveDrawingBuffer: true });
+  r.setPixelRatio(1); r.setSize(W, H); r.setScissorTest(true);
+  r.outputColorSpace = THREE.SRGBColorSpace;
+  r.setViewport(0, 0, W, H); r.setScissor(0, 0, W, H); r.setClearColor(0x191d23, 1); r.clear();
+  const cam = new THREE.PerspectiveCamera(30, (W / 3) / H, R / 100, R * 10);
+  // «спереди» у зверя в игре — это -Z, потому и смотрим с этой стороны
+  [[0, 0.12, -1], [1, 0.12, 0], [0.85, 0.45, -0.85]].forEach((v, i) => {
+    r.setViewport(i * W / 3, 0, W / 3, H);
+    r.setScissor(i * W / 3 + 1, 1, W / 3 - 2, H - 2);
+    cam.position.set(c.x + v[0] * R * 2.2, c.y + v[1] * R * 2.2, c.z + v[2] * R * 2.2);
+    cam.lookAt(c); cam.updateProjectionMatrix();
+    r.render(sc, cam);
+  });
+  log('вид: в морду (-Z, туда зверь и смотрит) · сбоку · три четверти');
+}
+</script></body></html>

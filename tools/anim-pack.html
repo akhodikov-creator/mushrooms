@@ -5,57 +5,129 @@
 "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.168.0/examples/jsm/"}}
 </script></head>
 <body style="background:#111;color:#9fb;font:13px/1.6 monospace;padding:12px">
-<pre id="out">жду: window.__pack()</pre>
+<pre id="out">гружу…</pre>
 <script type="module">
 /* Сборка одной модели с несколькими анимациями.
+
    Mixamo отдаёт по файлу на клип, и в каждом лежит полная копия меша:
-   четыре анимации — четыре меша, 3 МБ вместо одного. Здесь меш берётся
-   из первого файла, клипы из всех, и всё пишется одним .glb. */
+   три анимации — три меша, лишние два мегабайта. Здесь меш берётся из
+   первого файла, клипы из всех, и всё пишется одним .glb.
+
+   Открывать с порта tools/serve.py — результат уходит запросом PUT.
+
+   ?src=имя:путь,имя:путь,…   клипы по порядку; меш берётся из первого
+   ?out=assets/что-то.glb     куда положить
+   ?keep=Mesh1,Mesh2          оставить только эти меши (пусто — все)
+   ?smooth=1                  сшить вершины по положению и сгладить нормали
+   ?inplace=1                 убрать разбег: корень не едет по земле, только вверх-вниз
+*/
 import * as THREE from 'three';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 
-const log = (t) => { document.getElementById('out').textContent += '\n' + t; };
+const q = new URLSearchParams(location.search);
+const SRC = (q.get('src') || '').split(',').filter(Boolean)
+  .map((s) => { const i = s.indexOf(':'); return [s.slice(0, i), s.slice(i + 1)]; });
+const OUT = q.get('out') || 'assets/anim.glb';
+const KEEP = (q.get('keep') || '').split(',').map((s) => s.trim()).filter(Boolean);
+const SMOOTH = q.get('smooth') === '1';
+const INPLACE = q.get('inplace') === '1';
 
-const SRC = [
-  ['walk', 'assets/_anim_walk.fbx'],
-  ['sprint', 'assets/_anim_sprint.fbx'],
-  ['jump', 'assets/_anim_jump.fbx'],
-  ['steal', 'assets/_anim_steal.fbx'],
-];
+/**
+ * Бег на месте.
+ *
+ * Mixamo гонит персонажа корневой костью: за 0.9 секунды бега бёдра
+ * уезжают на триста единиц вперёд. Зверя в игре двигает свой код, и
+ * если оставить как есть, он поедет дважды — рывками и мимо цели.
+ * Горизонталь корня замораживаем на первом кадре, высоту оставляем:
+ * на ней держится и подскок в беге, и оседание в смерти.
+ */
+function inPlace(clip) {
+  let hit = 0;
+  for (const t of clip.tracks) {
+    if (!/\.position$/.test(t.name)) continue;
+    if (!/Hips$/.test(t.name.split('.')[0])) continue;
+    const v = t.values;
+    const x0 = v[0], z0 = v[2];
+    let moved = 0;
+    for (let i = 0; i < v.length; i += 3) {
+      moved = Math.max(moved, Math.abs(v[i] - x0), Math.abs(v[i + 2] - z0));
+      v[i] = x0; v[i + 2] = z0;
+    }
+    hit++;
+    return 'разбег убран, было ' + moved.toFixed(0) + ' ед.';
+  }
+  return hit ? '' : 'корневой дорожки нет';
+}
 
-window.__pack = async (outName = 'assets/shroom_anim.glb') => {
-  const load = (url) => new Promise((ok, no) => new FBXLoader().load(url, ok, undefined, no));
+const el = document.getElementById('out');
+const log = (t) => { el.textContent += '\n' + t; };
+
+(async () => {
+  if (!SRC.length) { el.textContent = 'нечего паковать: задай ?src=имя:путь,…'; return; }
+  el.textContent = 'клипов к сборке: ' + SRC.length;
 
   let root = null;
   const clips = [];
   for (const [name, url] of SRC) {
-    const obj = await load(url);
+    const obj = await new FBXLoader().loadAsync(url).catch((e) => { log(url + ': ' + e); return null; });
+    if (!obj) continue;
     const cl = obj.animations && obj.animations[0];
-    if (!cl) { log(`${url}: клипа нет`); continue; }
+    if (!cl) { log(name + ' (' + url + '): клипа нет'); continue; }
     cl.name = name;
+    if (INPLACE) log(name + ': ' + inPlace(cl));
     clips.push(cl);
-    log(`${name}: ${cl.duration.toFixed(2)} c, дорожек ${cl.tracks.length}`);
+    log(name + ': ' + cl.duration.toFixed(2) + ' c, дорожек ' + cl.tracks.length);
     if (!root) root = obj;
   }
-  if (!root) return 'нечего паковать';
+  if (!root) { log('ОШИБКА: ни одного меша'); return; }
 
-  // мех и скелет берём из первого файла, остальные нужны были только ради клипов
+  // меш и скелет — из первого файла; остальные нужны были ради клипов
+  const drop = [];
   root.traverse((o) => {
-    if (o.isMesh) {
-      o.material = new THREE.MeshStandardMaterial({ name: 'shroom', roughness: 0.85 });
-      log(`меш ${o.name}: ${o.geometry.attributes.position.count} вершин, ` +
-          `развёртка ${o.geometry.attributes.uv ? 'есть' : 'НЕТ'}`);
-    }
+    if (!o.isMesh && !o.isSkinnedMesh) return;
+    if (KEEP.length && !KEEP.includes(o.name)) { drop.push(o); return; }
+    // Геометрия из obj приезжает разиндексированной: у каждой грани свои
+    // три вершины, и в .glb это втрое больше веса — а с костями ещё и
+    // индексы с весами на каждую. Сшиваем совпадающие; скелету всё равно,
+    // атрибуты у вершины переезжают целиком.
+    // При ?smooth=1 нормаль в сравнении не участвует: у шара каждая грань
+    // несёт свою, и вершины не сшиваются вовсе. Снимаем её перед сшивкой
+    // и считаем заново по сглаженной сетке — заодно шар перестаёт быть
+    // гранёным. На угловатых вещах так делать нельзя, рёбра поплывут.
+    const was = o.geometry.attributes.position.count;
+    if (SMOOTH) o.geometry.deleteAttribute('normal');
+    const sewn = mergeVertices(o.geometry, 1e-4);
+    if (sewn.attributes.position.count < was) o.geometry = sewn;
+    if (SMOOTH) o.geometry.computeVertexNormals();
+    const g = o.geometry;
+    log('меш ' + o.name + ': ' + was + ' → ' + g.attributes.position.count +
+        ' вершин, развёртка ' + (g.attributes.uv ? 'есть' : 'НЕТ') +
+        (o.isSkinnedMesh ? ', со скелетом' : ''));
+    const ms = Array.isArray(o.material) ? o.material : [o.material];
+    log('   материалы: ' + ms.map((m) => (m.name || '?') + ' #' +
+        (m.color ? m.color.getHexString() : '—')).join(', '));
   });
+  drop.forEach((o) => { o.parent.remove(o); log('выброшен меш ' + o.name); });
+
+  let bones = 0;
+  root.traverse((o) => { if (o.isBone) bones++; });
+  const box = new THREE.Box3().setFromObject(root);
+  const size = box.getSize(new THREE.Vector3());
+  log('костей: ' + bones);
+  log('габарит: ' + [size.x, size.y, size.z].map((v) => v.toFixed(2)).join(' x ') +
+      ', низ y=' + box.min.y.toFixed(2));
 
   const glb = await new Promise((ok, no) =>
     new GLTFExporter().parse(root, ok, no, { binary: true, animations: clips }));
-  log(`glb: ${(glb.byteLength / 1024).toFixed(0)} КБ, клипов ${clips.length}`);
+  log('glb: ' + (glb.byteLength / 1024).toFixed(0) + ' КБ, клипов ' + clips.length);
 
-  const r = await fetch('/' + outName, { method: 'PUT', body: glb });
-  log(`сохранено: ${r.status} ${await r.text()}`);
-  return { кБ: Math.round(glb.byteLength / 1024), клипы: clips.map((c) => c.name) };
-};
-log('готово к работе');
+  const r = await fetch('/' + OUT, { method: 'PUT', body: new Blob([glb]) });
+  log(OUT + ': ' + r.status + ' ' + (await r.text()));
+  window.__info = { клипы: clips.map((c) => [c.name, +c.duration.toFixed(2)]), кости: bones,
+                    габарит: [+size.x.toFixed(2), +size.y.toFixed(2), +size.z.toFixed(2)],
+                    низ: +box.min.y.toFixed(2), кБ: Math.round(glb.byteLength / 1024) };
+  window.__ready = true;
+})();
 </script></body></html>

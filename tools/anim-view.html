@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><base href="../"><title>anim view</title>
+<style>html,body{margin:0;background:#191d23;color:#9fb;font:12px/1.5 monospace}
+#log{padding:6px 8px;white-space:pre-wrap}canvas{display:block}</style>
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.168.0/build/three.module.js",
+"three/addons/":"https://cdn.jsdelivr.net/npm/three@0.168.0/examples/jsm/"}}
+</script></head><body>
+<div id="log">гружу…</div><canvas id="c"></canvas>
+<script type="module">
+/* Раскадровка анимации: клип нарезается на кадры и выкладывается лентой.
+   Смотреть движение в реальном времени через скриншоты бессмысленно —
+   а по ленте сразу видно и походку, и то, что модель, скажем, уезжает
+   из-под ног или проваливается под землю.
+
+   ?url=assets/что-то.glb
+   ?clip=run          какой клип (пусто — первый)
+   ?frames=8          сколько кадров
+   ?view=side|front|q ракурс
+   ?all=1             по строке на каждый клип
+*/
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+
+const q = new URLSearchParams(location.search);
+const URL_ = q.get('url') || 'assets/kopatych.glb';
+const ONE = q.get('clip') || '';
+const N = +(q.get('frames') || 8);
+const VIEW = q.get('view') || 'q';
+const ALL = q.get('all') === '1';
+const log = (t) => { document.getElementById('log').textContent += '\n' + t; };
+
+const DIR = { side: [1, 0.12, 0.05], front: [0, 0.12, 1], q: [0.85, 0.3, 0.85] }[VIEW]
+         || [0.85, 0.3, 0.85];
+
+const load = (u) => (/\.fbx(\?|$)/i.test(u)
+  ? new FBXLoader().loadAsync(u)
+  : new GLTFLoader().loadAsync(u).then((g) => { g.scene.animations = g.animations; return g.scene; }));
+
+load(URL_).then((root) => {
+  const clips = root.animations || [];
+  if (!clips.length) { log('в файле нет клипов'); return; }
+  log('клипы: ' + clips.map((c) => c.name + ' ' + c.duration.toFixed(2) + 'с').join(' · '));
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x191d23);
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 2.0));
+  const d = new THREE.DirectionalLight(0xffffff, 2.0); d.position.set(0.7, 1, 0.6); scene.add(d);
+  const d2 = new THREE.DirectionalLight(0xffffff, 0.7); d2.position.set(-0.6, 0.3, -0.7); scene.add(d2);
+  scene.add(root);
+
+  const mixer = new THREE.AnimationMixer(root);
+  const rows = ALL ? clips : [clips.find((c) => c.name === ONE) || clips[0]];
+
+  // рамку берём по покою: в прыжке модель улетает, и общий габарит
+  // растянул бы все кадры до нечитаемых
+  root.updateWorldMatrix(true, true);
+  const rest = new THREE.Box3().setFromObject(root);
+  const c0 = rest.getCenter(new THREE.Vector3());
+  const R = Math.max(...rest.getSize(new THREE.Vector3()).toArray()) * 1.15;
+
+  const CELL = Math.min(190, Math.floor(1180 / N));
+  const W = CELL * N, H = CELL * rows.length;
+  const cv = document.getElementById('c');
+  const r = new THREE.WebGLRenderer({ canvas: cv, antialias: true, preserveDrawingBuffer: true });
+  r.setPixelRatio(1); r.setSize(W, H); r.setScissorTest(true);
+  r.outputColorSpace = THREE.SRGBColorSpace;
+  r.setViewport(0, 0, W, H); r.setScissor(0, 0, W, H);
+  r.setClearColor(0x191d23, 1); r.clear();
+
+  const cam = new THREE.PerspectiveCamera(30, 1, R / 100, R * 10);
+  cam.position.set(c0.x + DIR[0] * R * 2.6, c0.y + DIR[1] * R * 2.6, c0.z + DIR[2] * R * 2.6);
+  cam.lookAt(c0);
+  cam.updateProjectionMatrix();
+
+  // опора: видно, стоит модель на земле или висит
+  const grid = new THREE.GridHelper(R * 2.2, 10, 0x50606e, 0x2c353d);
+  grid.position.y = rest.min.y;
+  scene.add(grid);
+
+  rows.forEach((clip, row) => {
+    mixer.stopAllAction();
+    const act = mixer.clipAction(clip);
+    act.reset().play();
+    let t = 0;
+    for (let i = 0; i < N; i++) {
+      const want = (clip.duration * i) / (N - 1 || 1);
+      mixer.update(want - t); t = want;
+      const x = i * CELL, y = H - (row + 1) * CELL;
+      r.setViewport(x, y, CELL, CELL);
+      r.setScissor(x + 1, y + 1, CELL - 2, CELL - 2);
+      r.render(scene, cam);
+    }
+    log('строка ' + (row + 1) + ': ' + clip.name + ', ' + clip.duration.toFixed(2) + ' с');
+  });
+  window.__ready = true;
+});
+</script></body></html>
