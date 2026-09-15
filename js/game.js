@@ -13,6 +13,34 @@ import { Leaderboard } from './leaderboard.js';
 import { MAT_MUSHROOM_HL, SPECIES_BY_ID, applyMushroomEnv } from './mushrooms.js';
 import { clamp, lerp, dampTo, fmtNum, terrainHeight, wrapDelta, isWater } from './utils.js';
 
+/* ============================================================
+   Скупщик у УАЗа. Принимает всё и всегда ворчит, сколько ни принеси —
+   это его единственная роль, зато узнаваемая.
+   ============================================================ */
+const BUYER_LINES = [
+  'Хули так мало-то?',
+  'И это всё? Я тут, блядь, не за спасибо сижу.',
+  'Ты там спал, что ли? Хули так мало.',
+  'Мало. Всегда мало. Хули ты на меня смотришь.',
+  'Опять эта мелочь. Иди нормальные ищи.',
+  'Да я за день больше в сапог насыпаю.',
+  'Хули тут считать, тут и весов не надо.',
+  'Ну ты и грибник, конечно. Хер знает что принёс.',
+  'Так, и нахуя мне это? Ладно, давай сюда.',
+  'Негусто. Совсем негусто, блядь.',
+  'Соседский пацан вдвое больше носит. Хули ты возишься?',
+  'Это что, всё? Я думал, ты на весь день ушёл.',
+  'За такое даже на бензин не выйдет. Хер с тобой, беру.',
+  'Ещё бы пару штук — и было бы мало. А так вообще ничего.',
+];
+
+const BUYER_LINES_FULL = [
+  'Полную притащил, а всё равно хули так мало.',
+  'О, целая тара. И всё равно мало, блядь.',
+  'Ну наконец-то. Но мало, ты не подумай.',
+  'Вот это уже похоже на дело. Хотя мало.',
+];
+
 export class Game {
   constructor() {
     this.canvas = document.getElementById('c');
@@ -62,6 +90,7 @@ export class Game {
     this.inv = new Inventory();
 
     this.state = 'menu';
+    this._lastBuyerLine = '';
     this.dayT = 0;
     this.timeScale = 1;
     this.slowmoT = 0;
@@ -257,11 +286,26 @@ export class Game {
   /* ============================================================
      Сдача грибов
      ============================================================ */
+
+  /** Реплика скупщика: он недоволен всегда, в этом и шутка. */
+  _buyerLine(r) {
+    const full = r.items >= this.inv.cap * 0.8;
+    const pool = full ? BUYER_LINES_FULL : BUYER_LINES;
+    let line = pool[(Math.random() * pool.length) | 0];
+    // два раза подряд одну и ту же — уже не смешно
+    for (let i = 0; i < 4 && line === this._lastBuyerLine; i++) {
+      line = pool[(Math.random() * pool.length) | 0];
+    }
+    this._lastBuyerLine = line;
+    return line;
+  }
+
   _deliver() {
     const r = this.inv.deliver();
     if (!r) { UI.toast('Тара пустая — нечего сдавать', 'warn'); return; }
     Audio.upgrade();
     UI.toast(`Сдано ${r.items} шт. → <b>+${fmtNum(r.value)}</b>`, 'good');
+    UI.toast(`<q>${this._buyerLine(r)}</q><i>скупщик</i>`, 'buyer');
     if (r.upgraded) {
       UI.banner(r.upgraded.icon + '  ' + r.upgraded.name.toUpperCase(),
         `Вместимость ${r.upgraded.cap} · множитель ×${r.upgraded.mult.toFixed(2)}`, 3200, 'good');

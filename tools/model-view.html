@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ru"><head><meta charset="utf-8"><title>view</title>
+<html lang="ru"><head><meta charset="utf-8"><base href="../"><title>view</title>
 <style>html,body{margin:0;background:#111}canvas{display:block}
 #l{position:fixed;left:8px;top:6px;color:#9fb;font:12px monospace;white-space:pre}</style>
 <script type="importmap">
@@ -8,10 +8,20 @@
 </script></head><body>
 <div id="l">загрузка…</div>
 <script type="module">
+/* Смотрелка моделей с четырёх сторон.
+   ?slot=pistol  — слот из config.js, уже с применённым fit: так и
+                   подбираются масштаб и развороты;
+   ?url=assets/uaz.glb — файл напрямую, как он лежит на диске.
+   ?raw=1 — не подменять материалы на нейтральный, показать свои. */
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { onAsset, instance } from './js/assets.js';
 
-const url = new URLSearchParams(location.search).get('url') || '../assets/feet.glb';
+const q = new URLSearchParams(location.search);
+const slot = q.get('slot');
+const url = q.get('url');
+const raw = q.get('raw') === '1';
+
 const W = 1000, H = 700;
 const r = new THREE.WebGLRenderer({ antialias: true });
 r.setPixelRatio(1); r.setSize(W, H); r.setScissorTest(true);
@@ -24,39 +34,65 @@ const d = new THREE.DirectionalLight(0xffffff, 2.2); d.position.set(0.6, 1, 0.5)
 const d2 = new THREE.DirectionalLight(0xffffff, 0.9); d2.position.set(-0.5, 0.2, -0.6); scene.add(d2);
 
 const cams = [];
-for (let i = 0; i < 4; i++) cams.push(new THREE.PerspectiveCamera(34, (W / 2) / (H / 2), 0.005, 20));
+for (let i = 0; i < 4; i++) cams.push(new THREE.PerspectiveCamera(34, (W / 2) / (H / 2), 0.002, 40));
 
-new GLTFLoader().load(url, (g) => {
-  const obj = g.scene;
-  obj.traverse((o) => { if (o.isMesh) o.material = new THREE.MeshStandardMaterial({ color: 0xb08050, roughness: 0.85 }); });
+function show(obj, label) {
+  if (!raw) {
+    obj.traverse((o) => {
+      if (o.isMesh) o.material = new THREE.MeshStandardMaterial({ color: 0xb08050, roughness: 0.85 });
+    });
+  }
   scene.add(obj);
   const b = new THREE.Box3().setFromObject(obj);
   const c = b.getCenter(new THREE.Vector3());
   const s = b.getSize(new THREE.Vector3());
   const R = Math.max(s.x, s.y, s.z) * 2.1;
   const put = (i, dx, dy, dz, up) => {
+    // дальнюю плоскость подгоняем под модель: у неподогнанной чужой
+    // модели габарит бывает в тысячах единиц, и всё уезжает за отсечку
+    cams[i].near = R / 200; cams[i].far = R * 4;
     cams[i].position.set(c.x + dx * R, c.y + dy * R, c.z + dz * R);
     cams[i].up.set(...up); cams[i].lookAt(c); cams[i].updateProjectionMatrix();
   };
   put(0, 0, 0.99, 0.02, [0, 0, -1]);     // сверху
   put(1, 0.99, 0.15, 0, [0, 1, 0]);      // сбоку +X
-  put(2, 0, 0.1, -0.99, [0, 1, 0]);      // спереди (носок к нам)
+  put(2, 0, 0.1, -0.99, [0, 1, 0]);      // спереди, со стороны -Z
   put(3, 0.6, 0.5, -0.6, [0, 1, 0]);     // три четверти
   draw();
-  let tris = 0; obj.traverse((o) => { if (o.isMesh) tris += o.geometry.index ? o.geometry.index.count / 3 : o.geometry.attributes.position.count / 3; });
+  let tris = 0, meshes = 0;
+  obj.traverse((o) => {
+    if (!o.isMesh) return;
+    meshes++;
+    const g = o.geometry;
+    tris += g.index ? g.index.count / 3 : g.attributes.position.count / 3;
+  });
   document.getElementById('l').textContent =
-    url + '\n габарит, м: ' + [s.x, s.y, s.z].map((v) => v.toFixed(3)).join(' x ') +
-    '\n треугольников: ' + tris +
+    label + '\n габарит, м: ' + [s.x, s.y, s.z].map((v) => v.toFixed(3)).join(' x ') +
+    '\n центр: ' + [c.x, c.y, c.z].map((v) => v.toFixed(3)).join(', ') +
+    '\n мешей: ' + meshes + ', треугольников: ' + Math.round(tris) +
     '\n↖ сверху   ↗ сбоку +X\n↙ спереди  ↘ три четверти';
-}, undefined, (e) => { document.getElementById('l').textContent = 'ошибка: ' + e; });
+}
+
+if (slot) {
+  onAsset(slot, () => show(instance(slot), 'слот ' + slot + ' (с fit)'));
+  setTimeout(() => {
+    if (!scene.children.some((o) => o.type === 'Group' || o.isMesh)) {
+      document.getElementById('l').textContent = 'слот ' + slot + ' не загрузился — смотри консоль';
+    }
+  }, 15000);
+} else {
+  new GLTFLoader().load(url || 'assets/feet.glb', (g) => show(g.scene, url),
+    undefined, (e) => { document.getElementById('l').textContent = 'ошибка: ' + e; });
+}
 
 function draw() {
   r.setViewport(0, 0, W, H); r.setScissor(0, 0, W, H); r.setClearColor(0x181c22, 1); r.clear();
-  const q = [[0, H / 2], [W / 2, H / 2], [0, 0], [W / 2, 0]];
+  const quad = [[0, H / 2], [W / 2, H / 2], [0, 0], [W / 2, 0]];
   cams.forEach((c, i) => {
-    r.setViewport(q[i][0], q[i][1], W / 2, H / 2);
-    r.setScissor(q[i][0] + 1, q[i][1] + 1, W / 2 - 2, H / 2 - 2);
+    r.setViewport(quad[i][0], quad[i][1], W / 2, H / 2);
+    r.setScissor(quad[i][0] + 1, quad[i][1] + 1, W / 2 - 2, H / 2 - 2);
     r.render(scene, c);
   });
 }
+window.__draw = draw;
 </script></body></html>

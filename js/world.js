@@ -377,11 +377,21 @@ export const TREE_TYPES = ['pine', 'spruce', 'birch', 'aspen'];
 /* ============================================================
    Приёмный пункт: «Буханка», палатка, ящики, костёр, луч-маяк
    ============================================================ */
-function buildCamp() {
-  const g = new THREE.Group();
-  const p = [];
+/**
+ * УАЗ на приёмном пункте: скачанная модель или коробочная «буханка».
+ * Модель уже в метрах, колёсами на нуле и капотом в -Z, так что
+ * ставится в начало координат лагеря как есть.
+ */
+function fillUaz(node) {
+  node.clear();
+  const model = instance('uaz');
+  if (model) {
+    model.traverse((o) => { if (o.isMesh) o.frustumCulled = true; });
+    node.add(model);
+    return;
+  }
 
-  // УАЗ-«буханка»
+  const p = [];
   const body = new THREE.BoxGeometry(2.0, 1.5, 4.4);
   body.translate(0, 1.35, 0);
   p.push(paint(body, 0xb8bfa8, 0.06));
@@ -400,6 +410,18 @@ function buildCamp() {
   const win = new THREE.BoxGeometry(1.9, 0.5, 0.06);
   win.translate(0, 1.85, 2.22);
   p.push(paint(win, 0x18323a));
+  node.add(new THREE.Mesh(mergeParts(p), MAT.prop));
+}
+
+function buildCamp() {
+  const g = new THREE.Group();
+  const p = [];
+
+  // УАЗ — отдельным узлом: его подменяет скачанная модель
+  const uaz = new THREE.Group();
+  fillUaz(uaz);
+  onAsset('uaz', () => fillUaz(uaz));
+  g.add(uaz);
 
   // палатка-скупка
   const tent = new THREE.ConeGeometry(2.1, 2.0, 4);
@@ -777,8 +799,9 @@ export class World {
         if (!man) continue;
         // между палаткой и костром, лицом наружу — за «Буханкой» его
         // не видно, а это единственный живой человек в лесу
-        man.position.set(-1.6, 0, 3.2);
-        man.rotation.y = 0.35;
+        // у водительской двери УАЗа, лицом наружу
+        man.position.set(-1.55, 0, 0.9);
+        man.rotation.y = -1.25;
         // Загрузчик выключает отсечение (это нужно моделям в руках),
         // но скупщик — обычный объект мира: пусть его отсекает пирамида,
         // иначе четыре пункта рисуются всегда, даже за спиной.

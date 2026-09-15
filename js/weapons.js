@@ -109,6 +109,8 @@ function fillHand(node) {
     // глаз бесполезно, кулак с обеих сторон выглядит одинаково.
     const cfg = ASSETS.hands;
     if (side !== (cfg.side || 1)) model.scale.x *= -1;
+    // тот же материал, что у предплечья: иначе на запястье виден стык
+    model.traverse((o) => { if (o.isMesh) o.material = VM.skin; });
     const curls = pose === 'fist' ? cfg.fistCurl : cfg.openCurl;
     // знак сгиба от стороны не зависит: зеркало применяется к целой
     // кисти вместе со скелетом и само переворачивает позу
@@ -126,23 +128,27 @@ function fillHand(node) {
 }
 
 /**
- * Манжета и обрез рукава, поставленные матрицей m.
- * Рукав строится вдоль +Z и уходит от запястья назад.
+ * Предплечье, поставленное матрицей m: голая рука и закатанный
+ * по локоть рукав на дальнем конце. Строится вдоль +Z и уходит
+ * от запястья назад.
  */
 function sleeveAt(m) {
-  const out = [];
-  const cuff = new THREE.CylinderGeometry(0.040, 0.045, 0.055, 14);
-  cuff.rotateX(Math.PI / 2);
-  cuff.translate(0, 0, 0.03);
-  cuff.applyMatrix4(m);
-  out.push(paint(cuff, 0xffffff));
+  const skin = [], cloth = [];
 
-  const sleeve = new THREE.CylinderGeometry(0.043, 0.044, 0.085, 14);
-  sleeve.rotateX(Math.PI / 2);
-  sleeve.translate(0, 0, 0.098);
-  sleeve.applyMatrix4(m);
-  out.push(paint(sleeve, 0xd8dcc8));
-  return out;
+  const arm = new THREE.CylinderGeometry(0.039, 0.047, 0.13, 14);
+  arm.rotateX(Math.PI / 2);
+  arm.translate(0, 0, 0.08);
+  arm.applyMatrix4(m);
+  skin.push(arm);
+
+  // закатанный рукав: валик ткани, чтобы рука не обрывалась в пустоте
+  const roll = new THREE.CylinderGeometry(0.052, 0.050, 0.055, 14);
+  roll.rotateX(Math.PI / 2);
+  roll.translate(0, 0, 0.158);
+  roll.applyMatrix4(m);
+  cloth.push(paint(roll, 0x8e9a72));
+
+  return { skin, cloth };
 }
 
 /**
@@ -190,7 +196,8 @@ function armAt(side, pose, m, bend = 0) {
 
   const cuffM = new THREE.Matrix4().makeRotationX(bend);
   cuffM.premultiply(new THREE.Matrix4().makeTranslation(0, 0, WRIST_Z));
-  arm.add(assemble([[VM.cloth, sleeveAt(cuffM)]]));
+  const fore = sleeveAt(cuffM);
+  arm.add(assemble([[VM.skin, fore.skin], [VM.cloth, fore.cloth]]));
   return arm;
 }
 
@@ -300,7 +307,7 @@ function buildKnife() {
 }
 
 /* ---------- ТТ: рамка, затвор с насечкой, накладки ---------- */
-function buildPistol() {
+function pistolGeometry() {
   const steel = [], wood = [], brass = [];
   const dark = 0x6a6f78, darker = 0x565b64;
 
@@ -359,19 +366,9 @@ function buildPistol() {
   // целик
   steel.push(box(0.014, 0.006, 0.008, 0, 0.060, 0.026, 0xb8bcc4));
 
-  // Рукоять ТТ наклонена назад — вдоль неё и идёт обхват правого
-  // кулака, большой палец смотрит вверх к затвору. Левая кисть
-  // подхватывает правую сбоку, её предплечье уходит влево-назад.
-  const gripAxis = new THREE.Vector3(0, 0.965, -0.262);
-  const mR = gripBasis(gripAxis, new THREE.Vector3(0.42, -0.60, 0.68),
-    new THREE.Vector3(-0.002, -0.050, 0.026));
-  const mL = gripBasis(gripAxis.clone().applyAxisAngle(new THREE.Vector3(0, 0, 1), 0.30),
-    new THREE.Vector3(-0.50, -0.62, 0.60), new THREE.Vector3(0.030, -0.074, 0.050));
-
   const body = assemble([
     [VM.steel, steel], [VM.wood, wood], [VM.brass, brass],
   ]);
-  body.add(armAt(1, 'fist', mR, -0.16), armAt(-1, 'fist', mL, -0.16));
 
   // затвор — отдельной деталью, ездит при выстреле
   const sl = [];
@@ -385,10 +382,51 @@ function buildPistol() {
   muz.rotateX(Math.PI / 2);
   muz.translate(0, 0.044, -0.136);
   sl.push(paint(muz, 0x24282e));
-  const slide = new THREE.Mesh(mergeParts(sl), VM.steel);
+
+  return { body, slide: new THREE.Mesh(mergeParts(sl), VM.steel) };
+}
+
+/**
+ * Наполняет узлы пистолета: скачанная модель или своя.
+ * У модели затвор отдельной деталью не выделить — меши в ней
+ * называются Plane003 и Cube, — поэтому при выстреле дёргается вся
+ * рука целиком, а узел затвора остаётся пустым.
+ */
+function fillPistol(gun, slide) {
+  gun.clear();
+  slide.clear();
+  const model = instance('pistol');
+  if (model) {
+    model.traverse((o) => {
+      if (!o.isMesh) return;
+      paint(o.geometry, 0x9aa0aa);     // оружейным материалам нужен вершинный цвет
+      o.material = VM.steel;
+    });
+    gun.add(model);
+    return;
+  }
+  const parts = pistolGeometry();
+  gun.add(parts.body);
+  slide.add(parts.slide);
+}
+
+function buildPistol() {
+  // Рукоять наклонена назад — вдоль неё и идёт обхват кулака,
+  // большой палец смотрит вверх к затвору.
+  const gripAxis = new THREE.Vector3(0, 0.965, -0.262);
+  const mR = gripBasis(gripAxis, new THREE.Vector3(0.42, -0.60, 0.68),
+    new THREE.Vector3(-0.002, -0.050, 0.026));
+
+  const gun = new THREE.Group();
+  const slide = new THREE.Group();
+  fillPistol(gun, slide);
+  onAsset('pistol', () => fillPistol(gun, slide));
 
   const g = new THREE.Group();
-  g.add(body, slide);
+  g.add(gun, slide);
+  // Держим одной рукой: левая занята тарой, и вторая кисть на рукояти
+  // читалась третьей рукой в кадре.
+  g.add(armAt(1, 'fist', mR, -0.16));
   g.userData.slide = slide;
 
   // дульная вспышка

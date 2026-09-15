@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><base href="../"><title>inspect</title>
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.168.0/build/three.module.js",
+"three/addons/":"https://cdn.jsdelivr.net/npm/three@0.168.0/examples/jsm/"}}
+</script></head>
+<body style="background:#111;color:#9fb;font:13px/1.5 monospace;padding:12px">
+<pre id="out">гружу все слоты из config.js…</pre>
+<script type="module">
+/* Что лежит в каждой подключённой модели: меши, вершины, кости,
+   габарит в метрах. По этим числам и подбирается fit в config.js. */
+import { onAsset, inspectAsset, warmAssets, hasAsset } from './js/assets.js';
+import { ASSETS } from './js/config.js';
+
+const done = {};
+const names = Object.keys(ASSETS).filter(hasAsset);
+warmAssets();
+names.forEach((n) => onAsset(n, () => { done[n] = inspectAsset(n); render(); }));
+
+function render() {
+  const left = names.filter((n) => !done[n]);
+  document.getElementById('out').textContent =
+    JSON.stringify(done, null, 1) + (left.length ? '\n\nещё грузятся: ' + left.join(', ') : '\n\nвсё готово');
+}
+window.__done = () => done;
+setTimeout(render, 300);
+</script></body></html>

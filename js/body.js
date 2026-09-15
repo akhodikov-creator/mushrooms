@@ -11,6 +11,10 @@ import { dampTo, clamp } from './utils.js';
    с тарой. Всё висит на камере, поэтому едет вместе со взглядом.
    ============================================================ */
 
+/* Стенки вёдер и лукошка — открытые цилиндры без толщины. С обычным
+   отсечением изнанки задняя стенка изнутри пропадала, и сквозь тару
+   была видна трава: двусторонний материал закрывает дыру и не требует
+   лепить второй слой геометрии. */
 const MAT = {
   skin: new THREE.MeshStandardMaterial({
     map: skinTex(), roughness: 0.74, metalness: 0,
@@ -32,10 +36,10 @@ const MAT = {
     side: THREE.DoubleSide, transparent: true, opacity: 0.92,
   }),
   metal: new THREE.MeshStandardMaterial({
-    vertexColors: true, map: metalTex(), roughness: 0.4, metalness: 0.75,
+    vertexColors: true, side: THREE.DoubleSide, map: metalTex(), roughness: 0.4, metalness: 0.75,
   }),
   wicker: new THREE.MeshStandardMaterial({
-    vertexColors: true, map: woodTex(), roughness: 0.8, metalness: 0,
+    vertexColors: true, side: THREE.DoubleSide, map: woodTex(), roughness: 0.8, metalness: 0,
   }),
 };
 
@@ -256,16 +260,17 @@ function buildLeftHand() {
   const cloth = [];
   const A = 1.95;
   const dy = Math.cos(A), dz = Math.sin(A);
-  // манжета садится на срез запястья: у модели он на 0,10 м от кисти,
-  // и открытым его оставлять нельзя — он читается как плоский лоскут
-  const cuff = new THREE.CylinderGeometry(0.040, 0.045, 0.055, 14);
-  cuff.rotateX(A);
-  cuff.translate(0.004, HAND_GRIP + dy * 0.10, dz * 0.10);
-  cloth.push(paint(cuff, 0xffffff));
-  const sleeve = new THREE.CylinderGeometry(0.044, 0.046, 0.10, 14);
-  sleeve.rotateX(A);
-  sleeve.translate(0.008, HAND_GRIP + dy * 0.163, dz * 0.163);
-  cloth.push(paint(sleeve, 0xd8dcc8));
+  // Голая рука, а на дальнем конце — закатанный рукав. Заодно он
+  // затыкает срез запястья модели: у неё он на 0,10 м от кисти, и
+  // открытым читается как плоский лоскут.
+  const arm = new THREE.CylinderGeometry(0.039, 0.047, 0.14, 14);
+  arm.rotateX(A);
+  arm.translate(0.004, HAND_GRIP + dy * 0.115, dz * 0.115);
+  const roll = new THREE.CylinderGeometry(0.052, 0.050, 0.055, 14);
+  roll.rotateX(A);
+  roll.translate(0.008, HAND_GRIP + dy * 0.20, dz * 0.20);
+  cloth.push(paint(roll, 0x8e9a72));
+  g.add(new THREE.Mesh(arm, MAT.skin));
   g.add(new THREE.Mesh(mergeParts(cloth), MAT.cloth));
 
   return g;
@@ -279,6 +284,7 @@ function fillLeftHand(node) {
     const cfg = ASSETS.hands;
     // модель даёт одну конкретную руку; если пришла правая — зеркалим
     if ((cfg.side || 1) !== -1) model.scale.x *= -1;
+    model.traverse((o) => { if (o.isMesh) o.material = MAT.skin; });
     poseHandBones(model, cfg.fistCurl, cfg.bendAxis, cfg.bendSign);
     node.add(model);
     return;

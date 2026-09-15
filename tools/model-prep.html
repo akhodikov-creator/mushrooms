@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ru"><head><meta charset="utf-8"><title>convert</title>
+<html lang="ru"><head><meta charset="utf-8"><base href="../"><title>convert</title>
 <script type="importmap">
 {"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.168.0/build/three.module.js",
 "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.168.0/examples/jsm/"}}
@@ -82,7 +82,7 @@ function decimate(geo, target) {
 }
 
 window.__convertFeet = async () => {
-  const root = await new Promise((ok, no) => new FBXLoader().load('../assets/feet.fbx', ok, undefined, no));
+  const root = await new Promise((ok, no) => new FBXLoader().load('assets/feet.fbx', ok, undefined, no));
   let mesh = null;
   root.traverse((o) => { if (!mesh && o.isMesh) mesh = o; });
   root.updateWorldMatrix(true, true);

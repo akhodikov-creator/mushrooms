@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><base href="../"><title>viewmodel</title>
+<style>html,body{margin:0;background:#111}canvas{display:block}
+#l{position:fixed;left:8px;top:6px;color:#9fb;font:12px monospace;white-space:pre}</style>
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.168.0/build/three.module.js",
+"three/addons/":"https://cdn.jsdelivr.net/npm/three@0.168.0/examples/jsm/"}}
+</script></head><body>
+<div id="l">жду: __mode('knife' | 'pistol' | 'hands')</div>
+<script type="module">
+/* Стенд для рук: то, что игрок видит перед собой, плюс три облёта.
+   Подбирать хват по игре неудобно: модель сидит в углу кадра и мелкая.
+   __mode('knife' | 'pistol' | 'hands') переключает режим. */
+import * as THREE from 'three';
+import { Weapons } from './js/weapons.js';
+
+const W = 1000, H = 640;
+const r = new THREE.WebGLRenderer({ antialias: true });
+r.setPixelRatio(1); r.setSize(W, H); r.setScissorTest(true);
+document.body.appendChild(r.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1b2026);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 1.6));
+const dl = new THREE.DirectionalLight(0xffffff, 1.6); dl.position.set(0.4, 1, 0.6); scene.add(dl);
+
+const eye = new THREE.PerspectiveCamera(70, W / H, 0.01, 100);
+scene.add(eye);
+const w = new Weapons(eye, { list: [] }, scene);
+window.__w = w;
+
+const pivot = new THREE.Vector3();
+const cams = [];
+for (let i = 0; i < 4; i++) cams.push(new THREE.PerspectiveCamera(34, (W / 2) / (H / 2), 0.005, 10));
+cams[0].fov = 70;                       // ровно то, что видит игрок
+
+function place() {
+  const R = 0.46;
+  cams[0].position.set(0, 0, 0); cams[0].lookAt(0, 0, -1);
+  cams[0].setViewOffset(1000, 640, 520, 280, 480, 350);
+  cams[1].position.set(pivot.x, pivot.y + R, pivot.z + 0.05); cams[1].up.set(0, 0, -1); cams[1].lookAt(pivot);
+  cams[2].position.set(pivot.x - R, pivot.y + 0.1, pivot.z); cams[2].up.set(0, 1, 0); cams[2].lookAt(pivot);
+  cams[3].position.set(pivot.x + R * 0.7, pivot.y + 0.15, pivot.z + R * 0.7); cams[3].up.set(0, 1, 0); cams[3].lookAt(pivot);
+  cams.forEach((c, i) => { if (i) c.aspect = (W / 2) / (H / 2); c.updateProjectionMatrix(); });
+}
+
+function draw() {
+  r.setViewport(0, 0, W, H); r.setScissor(0, 0, W, H); r.setClearColor(0x1b2026, 1); r.clear();
+  const q = [[0, H / 2], [W / 2, H / 2], [0, 0], [W / 2, 0]];
+  cams.forEach((c, i) => {
+    r.setViewport(q[i][0], q[i][1], W / 2, H / 2);
+    r.setScissor(q[i][0] + 1, q[i][1] + 1, W / 2 - 2, H / 2 - 2);
+    r.render(scene, c);
+  });
+}
+
+let mode = 'knife';
+window.__mode = (m = 'knife') => {
+  mode = m;
+  w.current = m;
+  for (const k of ['hands', 'knife', 'pistol']) w.obj(k).visible = (k === m);
+  w._place();
+  const o = w.obj(m);
+  o.updateWorldMatrix(true, true);
+  new THREE.Box3().setFromObject(o).getCenter(pivot);
+  place(); draw();
+  document.getElementById('l').textContent =
+    'режим ' + m + '\n↖ глазами игрока  ↗ сверху\n↙ слева           ↘ справа-сзади';
+  return { режим: m, центр: [+pivot.x.toFixed(3), +pivot.y.toFixed(3), +pivot.z.toFixed(3)] };
+};
+
+setTimeout(() => window.__mode('knife'), 1500);
+window.__mode('knife');
+</script></body></html>

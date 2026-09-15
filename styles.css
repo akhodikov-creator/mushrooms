@@ -442,6 +442,10 @@ ul.keys em{color:var(--gold);font-style:normal}
 .toast.bad{border-left-color:var(--red)}
 .toast.warn{border-left-color:#e8a030}
 .toast.info{border-left-color:#4a90c0}
+/* реплика скупщика: курсив и серая приписка с именем */
+.toast.buyer{border-left-color:#9a7a4a;background:rgba(42,34,22,.86)}
+.toast.buyer q{font-style:italic;quotes:none}
+.toast.buyer q:before{content:'— '}
 
 /* баннер */
 .banner{
