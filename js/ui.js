@@ -18,7 +18,7 @@ export const UI = {
       'sens', 'sens-val', 'vol', 'vol-val', 'quality', 'vignette', 'end-sub', 'threat-ring',
       'level-num', 'level-fill', 'buffs', 'threat-arrow', 'radar-label', 'now-cue',
       'bag', 'bag-body', 'bag-cap', 'weather', 'lamp',
-      'buyer-say', 'buyer-say-text',
+      'buyer-say', 'buyer-say-text', 'perf',
     ];
     for (const id of ids) this.el[id] = $(id);
     this.radarCtx = this.el.radar ? this.el.radar.getContext('2d') : null;

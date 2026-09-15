@@ -4,7 +4,7 @@ import { Audio } from './audio.js';
 import { UI } from './ui.js';
 import { World, CAMPS, applyEnvMap } from './world.js';
 import { Player } from './player.js';
-import { AnimalManager, KINDS, applyAnimalEnv } from './animals.js';
+import { AnimalManager, KINDS, applyAnimalEnv, animalWarmupModels } from './animals.js';
 import { Weapons, applyWeaponEnv } from './weapons.js';
 import { Pickups, applyPickupEnv } from './pickups.js';
 import { Body, applyBodyEnv } from './body.js';
@@ -154,6 +154,7 @@ export class Game {
           break;
         case 'KeyF': this._toggleLamp(); break;
         case 'Tab': e.preventDefault(); this._toggleBag(); break;
+        case 'F3': e.preventDefault(); this._togglePerf(); break;
       }
     });
 
@@ -281,6 +282,97 @@ export class Game {
     UI.banner('МЕДВЕДЬ', 'Пробел — уйти в сторону. Стоять на месте нельзя', 3200, 'bad');
     this.shake = 0.85;
     UI.toast('Зачем ты тронул гигантский мухомор…', 'bad');
+  }
+
+  /**
+   * Счётчик кадров по F3.
+   *
+   * «Местами подлагивает» — не то, по чему можно чинить: нужно знать,
+   * сколько кадров и где именно проседает. Здесь и средний кадр, и
+   * худший за последнюю секунду, и нагрузка сцены.
+   */
+  _togglePerf() {
+    this._perfOn = !this._perfOn;
+    const el = UI.el.perf;
+    if (el) el.hidden = !this._perfOn;
+    this._perfT = 0;
+    this._perfN = 0;
+    this._perfWorst = 0;
+    this._perfSum = 0;
+  }
+
+  _updatePerf(raw) {
+    if (!this._perfOn) return;
+    this._perfSum += raw;
+    this._perfN++;
+    this._perfWorst = Math.max(this._perfWorst, raw);
+    this._perfT += raw;
+    if (this._perfT < 0.5) return;
+
+    const avg = this._perfSum / this._perfN;
+    const worst = this._perfWorst;
+    const info = this.renderer.info.render;
+    const el = UI.el.perf;
+    if (el) {
+      el.innerHTML =
+        `<b>${Math.round(1 / avg)}</b> fps · кадр ${(avg * 1000).toFixed(1)} мс
+` +
+        `худший ${worst > 0.05 ? '<s>' : ''}${(worst * 1000).toFixed(0)} мс${worst > 0.05 ? '</s>' : ''}
+` +
+        `вызовов ${info.calls} · треуг ${(info.triangles / 1000).toFixed(0)}k
+` +
+        `зверей ${this.animals.list.length} · шейдеров ${this.renderer.info.programs.length}`;
+    }
+    this._perfT = 0;
+    this._perfN = 0;
+    this._perfSum = 0;
+    this._perfWorst = 0;
+  }
+
+  /**
+   * Прогрев перед забегом.
+   *
+   * Первая отрисовка каждого материала стоит компиляции шейдера, а
+   * первая отрисовка геометрии — заливки буферов в видеопамять. Пока
+   * это не сделано, любой новый объект в кадре даёт рывок: замер давал
+   * 538 мс на первом обороте вокруг себя и 360 мс на первом хариусе.
+   * Здесь всё оплачивается один раз, на переходе из меню в лес, где
+   * заминка незаметна.
+   */
+  _warmup() {
+    const probes = new THREE.Group();
+    for (const g of animalWarmupModels()) probes.add(g);
+    // ставим перед камерой: вне пирамиды видимости буферы не зальются
+    const dir = new THREE.Vector3();
+    this.camera.getWorldDirection(dir);
+    probes.position.copy(this.camera.position).addScaledVector(dir, 9);
+    this.scene.add(probes);
+
+    // временно показываем то, что прячется по дистанции или по режиму
+    const hidden = [];
+    const show = (o) => { if (o && !o.visible) { hidden.push(o); o.visible = true; } };
+    for (const { g } of this.world.campGroups) show(g.userData.buyer);
+    show(this.weapons.root);
+    show(this.body.root);
+    show(this.weapons.knife);
+    show(this.weapons.pistol);
+    show(this.weapons.bare);
+
+    this.renderer.compile(this.scene, this.camera);
+
+    // compile() собирает шейдеры, но буферы геометрии заливаются в
+    // видеопамять только при первой отрисовке — а то, что за спиной,
+    // отсекается пирамидой видимости и остаётся холодным. Поэтому
+    // прокручиваем камеру на полный круг: четыре поворота по 90°
+    // возвращают её ровно в исходное положение.
+    for (let i = 0; i < 4; i++) {
+      this.camera.rotateY(Math.PI / 2);
+      this.camera.updateMatrixWorld(true);
+      this.renderer.render(this.scene, this.camera);
+    }
+
+    this.scene.remove(probes);
+    for (const o of hidden) o.visible = false;
   }
 
   /* ============================================================
@@ -737,6 +829,12 @@ export class Game {
       this.player.x = nx; this.player.z = nz;
     }
     this.player.y = terrainHeight(this.player.x, this.player.z);
+    // Холостой шаг перед прогревом: свет и тени должны встать в боевое
+    // положение. При смене набора источников three пересобирает все
+    // шейдеры разом, и без этого 17 программ компилировались в первом
+    // же игровом кадре — 215 мс рывка на ровном месте.
+    this._update(1e-4);
+    this._warmup();
     UI.hideAll();
     UI.hideBag();
     UI.banner('УТРО. ТИХАЯ ОХОТА', '12 минут. Собирай быстро — множитель растёт', 3600, 'info');
@@ -863,6 +961,7 @@ export class Game {
     else if (this.state === 'menu') this._updateMenu(raw);
 
     this.renderer.render(this.scene, this.camera);
+    this._updatePerf(raw);
   }
 
   /** Медленный облёт леса за спиной главного меню. */
@@ -882,6 +981,14 @@ export class Game {
     this.world.updateDaylight(0.28, this.scene);
     this.world.update(p.x, p.z, dt, 0.28, this.camera);
     this.world.updateMushrooms(p.x, p.z, dt);
+
+    // Прогрев — на меню: камера здесь уже летает по настоящему лесу,
+    // и шейдеры зверей с оружием соберутся, пока игрок вбивает ник.
+    // На первом кадре рано: рендерер ещё не рисовал сцену ни разу.
+    if (!this._warmed && this.menuT > 0.6) {
+      this._warmed = true;
+      this._warmup();
+    }
   }
 
   _update(raw) {
@@ -918,10 +1025,11 @@ export class Game {
     this.inv.update(dt);
     this.weapons.update(dt, p);
     this.animals.update(dt, p);
-    this.pickups.update(dt, p.x, p.z);
+    this.pickups.update(dt, p.x, p.z, this.world);
     this.world.updateDaylight(clamp(this.dayT / CONFIG.dayLength, 0, 1), this.scene);
     this.world.update(p.x, p.z, dt, this.dayT / CONFIG.dayLength, this.camera);
     this.world.updateMushrooms(p.x, p.z, dt);
+    this.world.applyGlow();
 
     // --- прицеливание по грибам ---
     // базовый материал каждому грибу назначает updateMushrooms выше,

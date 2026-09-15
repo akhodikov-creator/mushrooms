@@ -467,6 +467,16 @@ ul.keys em{color:var(--gold);font-style:normal}
   text-shadow:0 0 44px rgba(255,190,60,.75),0 4px 26px rgba(0,0,0,.9);
 }
 
+/* Счётчик кадров (F3) */
+.perf{
+  position:absolute;left:10px;top:10px;padding:7px 10px;
+  background:rgba(0,0,0,.62);border-radius:8px;
+  color:#9fe05a;font:11px/1.45 ui-monospace,Consolas,monospace;
+  white-space:pre;pointer-events:none;
+}
+.perf b{color:#fff;font-weight:700}
+.perf s{color:#ff8b62;text-decoration:none}
+
 /* Реплика скупщика — по центру экрана, белым.
    В углу среди тостов её просто не читали. */
 .buyer-say{

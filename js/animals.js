@@ -356,6 +356,50 @@ export const KINDS = {
 
 let uid = 1;
 
+/* ============================================================
+   Прототипы зверей.
+
+   Собрать медведя из кусков — несколько миллисекунд, и приходятся
+   они ровно на тот кадр, когда зверь выскакивает из-за деревьев.
+   Поэтому каждый вид собирается один раз, а дальше клонируется:
+   клон делит с оригиналом и геометрию, и материалы, так что стоит
+   он копейки. Значит, и выбрасывать геометрию при смерти нельзя.
+   ============================================================ */
+const protos = new Map();
+
+function protoOf(kindId) {
+  let p = protos.get(kindId);
+  if (!p) {
+    p = KINDS[kindId].build();
+    p.head.name = 'head';
+    p.bodyMesh.name = 'body';
+    p.legs.forEach((l, i) => { l.name = 'leg' + i; });
+    protos.set(kindId, p);
+  }
+  return p;
+}
+
+function modelOf(kindId) {
+  const p = protoOf(kindId);
+  const g = p.g.clone(true);
+  return {
+    g,
+    head: g.getObjectByName('head'),
+    bodyMesh: g.getObjectByName('body'),
+    legs: p.legs.map((_, i) => g.getObjectByName('leg' + i)),
+  };
+}
+
+/**
+ * По одной модели каждого вида — для прогрева.
+ * Первая отрисовка нового материала стоит компиляции шейдера, и на
+ * слабой машине это сотни миллисекунд. Лучше заплатить их на загрузке,
+ * чем в кадре, где на игрока несётся кабан.
+ */
+export function animalWarmupModels() {
+  return Object.keys(KINDS).map((id) => modelOf(id).g);
+}
+
 class Animal {
   constructor(kindId, x, z, mgr) {
     this.k = KINDS[kindId];
@@ -379,7 +423,7 @@ class Animal {
     this.circleSide = Math.random() < 0.5 ? 1 : -1;
     this.lockDx = 0; this.lockDz = -1;
 
-    const m = this.k.build();
+    const m = modelOf(kindId);
     this.g = m.g;
     this.head = m.head;
     this.legs = m.legs;
@@ -390,8 +434,8 @@ class Animal {
   }
 
   dispose() {
+    // геометрия общая с прототипом — выбрасывать её нельзя
     this.mgr.root.remove(this.g);
-    this.g.traverse((o) => { if (o.isMesh && o.geometry) o.geometry.dispose(); });
   }
 
   damage(amount, headshot) {

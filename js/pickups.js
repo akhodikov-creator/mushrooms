@@ -227,9 +227,9 @@ export class Pickups {
     g.add(mesh);
 
     let p_beam = null;
-    const light = new THREE.PointLight(def.glow, 2.2, 9, 2);
-    light.position.y = 0.45;
-    g.add(light);
+    // Личной лампы у находки нет: она бы появлялась и исчезала вместе
+    // с ней, а three на смену числа источников пересобирает все шейдеры
+    // сцены. Свет берётся из общего пула мира.
 
     if (def.beam) {
       // Луч с затуханием кверху: находку должно быть видно издалека,
@@ -256,7 +256,7 @@ export class Pickups {
 
     this.root.add(g);
     const p = {
-      type, def, g, mesh, light, beam: p_beam,
+      type, def, g, mesh, beam: p_beam,
       x: wrapCoord(x), z: wrapCoord(z),
       y: terrainHeight(x, z), t: Math.random() * 10, taken: false, data,
     };
@@ -292,7 +292,7 @@ export class Pickups {
     if (i >= 0) this.list.splice(i, 1);
   }
 
-  update(dt, px, pz) {
+  update(dt, px, pz, world) {
     for (const p of this.list) {
       p.t += dt;
       p.g.position.set(
@@ -302,8 +302,15 @@ export class Pickups {
       );
       p.mesh.rotation.y = p.t * 0.8;
       const pulse = 0.5 + Math.sin(p.t * 3.4) * 0.5;
-      p.light.intensity = 1.6 + pulse * 1.5;
       if (p.beam) p.beam.material.opacity = 0.38 + pulse * 0.34;
+      if (world) {
+        const dx = p.g.position.x - px, dz = p.g.position.z - pz;
+        const d2 = dx * dx + dz * dz;
+        if (d2 < 900) {
+          world.requestGlow(p.g.position.x, p.g.position.y + 0.45, p.g.position.z,
+            p.def.glow, 1.6 + pulse * 1.5, d2);
+        }
+      }
     }
   }
 

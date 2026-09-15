@@ -443,10 +443,6 @@ function buildPistol() {
   g.add(flash);
   g.userData.flash = flash;
 
-  const fl = new THREE.PointLight(0xffc060, 0, 14, 2);
-  fl.position.set(0, 0.05, -0.2);
-  g.add(fl);
-  g.userData.light = fl;
 
   return g;
 }
@@ -489,6 +485,13 @@ export class Weapons {
     const vmLight = new THREE.PointLight(0xfff2dc, 2.2, 1.9, 1.6);
     vmLight.position.set(0.25, 0.15, 0.15);
     this.root.add(vmLight);
+
+    // Вспышка выстрела висит на корне, а не в группе пистолета: вместе
+    // с пистолетом она пропадала из сцены, число источников менялось,
+    // и three пересобирал все шейдеры при каждой смене оружия.
+    this.flashLight = new THREE.PointLight(0xffc060, 0, 14, 2);
+    this.flashLight.position.set(0.12, 0.0, -0.45);
+    this.root.add(this.flashLight);
 
     this.knife = buildKnife();
     this.pistol = buildPistol();
@@ -611,7 +614,7 @@ export class Weapons {
     p.flash.visible = true;
     p.flash.rotation.z = Math.random() * 6.28;
     p.flash.scale.setScalar(0.8 + Math.random() * 0.5);
-    p.light.intensity = 9;
+    this.flashLight.intensity = 9;
     this.flashT = 0.055;
 
     const hit = this.animals.raycast(origin, dir, 140);
@@ -742,7 +745,7 @@ export class Weapons {
       this.flashT -= dt;
       if (this.flashT <= 0) {
         this.pistol.userData.flash.visible = false;
-        this.pistol.userData.light.intensity = 0;
+        this.flashLight.intensity = 0;
       }
     }
 

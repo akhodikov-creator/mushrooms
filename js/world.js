@@ -478,7 +478,8 @@ function buildCamp() {
   g.add(uaz);
 
   // гора сданного
-  g.add(buildMushroomPile());
+  const pile = buildMushroomPile();
+  g.add(pile);
 
   // весы и ящики
   for (let i = 0; i < 5; i++) {
@@ -496,7 +497,13 @@ function buildCamp() {
     s.translate(2.6 + Math.cos(a) * 0.2, 0.3, 1.6 + Math.sin(a) * 0.2);
     p.push(paint(s, 0x3a2a18, 0.2));
   }
-  g.add(new THREE.Mesh(mergeParts(p), MAT.prop));
+  const props = new THREE.Mesh(mergeParts(p), MAT.prop);
+  g.add(props);
+
+  // Ящики, УАЗ и гора грибов — это 34 тысячи треугольников на пункт,
+  // и рисовались они с любого расстояния. Луч-маяк остаётся: по нему
+  // пункт и находят издалека.
+  g.userData.props = [uaz, pile, props];
 
   // пламя
   const flame = new THREE.Mesh(
@@ -507,10 +514,7 @@ function buildCamp() {
   g.add(flame);
   g.userData.flame = flame;
 
-  const fireLight = new THREE.PointLight(0xff8830, 2.4, 16, 2);
-  fireLight.position.set(2.6, 1.1, 1.6);
-  g.add(fireLight);
-  g.userData.fireLight = fireLight;
+
 
   // луч-маяк, чтобы пункт было видно сквозь туман
   const beamGeo = new THREE.CylinderGeometry(0.25, 0.9, 70, 10, 6, true);
@@ -802,12 +806,10 @@ class Chunk {
       };
       mesh.userData.m = m;
       this.mushrooms.push(m);
-      if (d.sp.glow) {
-        const l = new THREE.PointLight(d.sp.glow, 1.1, 5, 2);
-        l.position.set(d.lx, y + 0.3, d.lz);
-        this.mushGroup.add(l);
-        m.light = l;
-      }
+      // Личную лампу гриб больше не носит: их десятки, и каждая
+      // гасла и зажигалась по дистанции. Свет выдаётся из общего пула
+      // (см. requestGlow) — иначе число источников в сцене скачет.
+      if (d.sp.glow) m.glow = d.sp.glow;
     }
   }
 }
@@ -945,6 +947,13 @@ export class World {
     const n = Math.ceil(Math.PI * this.ngR * this.ngR * 1.05);
     this.nearGrass = new THREE.InstancedMesh(GEO.grass, MAT.grass, n);
     this.nearGrass.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    // Цвет травинок three завёл бы сам при первом setColorAt — но со
+    // статическим флагом. Ковёр пересобирается каждые два метра хода,
+    // и перезалив статического буфера заставлял драйвер ждать GPU:
+    // замер показывал провал до 100 мс раз в полсекунды при ходьбе.
+    this.nearGrass.instanceColor =
+      new THREE.InstancedBufferAttribute(new Float32Array(n * 3), 3);
+    this.nearGrass.instanceColor.setUsage(THREE.DynamicDrawUsage);
     this.nearGrass.frustumCulled = false;
     this.nearGrass.count = 0;
     this.scene.add(this.nearGrass);
@@ -962,8 +971,20 @@ export class World {
    * попадает максимум в четыре метровых ячейки, поэтому травинке
    * достаточно одного поиска по своей ячейке.
    */
+  /**
+   * Клетки вокруг грибов, где траву рисовать нельзя.
+   *
+   * Считается каждые два метра хода, и важна тут не скорость, а мусор.
+   * Строковый ключ вида "12,34" на каждую клетку ковра давал три
+   * тысячи временных строк за пересборку; сборщик мусора потом ронял
+   * кадр на сотню миллисекунд — при ходьбе это читалось как дёрганье.
+   * Ключ теперь числовой, Map и массивы переиспользуются.
+   */
   _bareSpots(px, pz, R) {
-    const map = new Map();
+    const map = this._bareMap || (this._bareMap = new Map());
+    const pool = this._barePool || (this._barePool = []);
+    map.clear();
+    let used = 0;
     const CLR = 0.42;
     for (const ch of this.chunks.values()) {
       if (!ch.built || !ch.group.visible) continue;
@@ -974,9 +995,14 @@ export class World {
         if (Math.abs(wx - px) > R + 1 || Math.abs(wz - pz) > R + 1) continue;
         for (let ix = Math.floor(wx - CLR); ix <= Math.floor(wx + CLR); ix++) {
           for (let iz = Math.floor(wz - CLR); iz <= Math.floor(wz + CLR); iz++) {
-            const key = ix + ',' + iz;
+            const key = (ix & 2047) * 2048 + (iz & 2047);
             let arr = map.get(key);
-            if (!arr) { arr = []; map.set(key, arr); }
+            if (!arr) {
+              arr = pool[used] || (pool[used] = []);
+              arr.length = 0;
+              used++;
+              map.set(key, arr);
+            }
             arr.push(wx, wz);
           }
         }
@@ -1010,7 +1036,7 @@ export class World {
         const wx = i + r1, wz = j + r2;
         if (isWater(wx, wz)) continue;
         // не заслоняем грибы
-        const spots = bare.get(i + ',' + j);
+        const spots = bare.get((i & 2047) * 2048 + (j & 2047));
         if (spots) {
           let blocked = false;
           for (let k = 0; k < spots.length; k += 2) {
@@ -1087,6 +1113,26 @@ export class World {
     }
     this.scene.add(this.sun);
     this.scene.add(this.sun.target);
+    /* Пул «светлячков».
+       Три лампы на всю сцену, всегда включённые в граф. Каждый кадр
+       они переезжают к ближайшим светящимся объектам — грибам и
+       находкам. Раньше лампа была у каждого объекта и гасла по
+       дистанции; three на смену числа источников пересобирает ВСЕ
+       шейдеры сцены, и это давало рывки на ровном месте. */
+    this.glowLights = [];
+    this._glowClaims = [];
+    for (let i = 0; i < 3; i++) {
+      const l = new THREE.PointLight(0xffffff, 0, 6, 2);
+      l.position.set(0, -50, 0);
+      this.root.add(l);
+      this.glowLights.push(l);
+    }
+
+    // Костёр горит во всех четырёх пунктах, но игрок всегда рядом
+    // максимум с одним: одна лампа переезжает к ближайшему.
+    this.campLight = new THREE.PointLight(0xff8830, 0, 16, 2);
+    this.root.add(this.campLight);
+
     this.hemi = new THREE.HemisphereLight(0x9fc0e8, 0x3a4426, 0.72);
     this.scene.add(this.hemi);
     this.ambient = new THREE.AmbientLight(0xffffff, 0.22);
@@ -1199,24 +1245,33 @@ export class World {
       if (near) ch.group.position.set(ox, 0, oz);
     }
 
+    let nearestCamp = Infinity;
     for (const { g, camp } of this.campGroups) {
       const ox = px + wrapDelta(camp.x - px);
       const oz = pz + wrapDelta(camp.z - pz);
       g.position.set(ox, terrainHeight(camp.x, camp.z), oz);
       // Скупщик стоит во всех четырёх пунктах, но модель тяжёлая:
       // показываем только того, к кому реально можно подойти.
-      if (g.userData.buyer) {
-        const d = Math.hypot(ox - px, oz - pz);
-        g.userData.buyer.visible = d < 120;
+      const dCamp = Math.hypot(ox - px, oz - pz);
+      if (g.userData.buyer) g.userData.buyer.visible = dCamp < 120;
+      if (g.userData.props) {
+        const near = dCamp < 165;
+        for (const o of g.userData.props) o.visible = near;
       }
 
       const f = g.userData.flame;
       if (f) {
         const s = 0.82 + Math.sin(this.time * 11) * 0.12 + Math.sin(this.time * 23) * 0.07;
         f.scale.set(s, 1 / s, s);
-        g.userData.fireLight.intensity = 2.2 + Math.sin(this.time * 13) * 0.6;
+        if (dCamp < nearestCamp) {
+          nearestCamp = dCamp;
+          this.campLight.position.set(ox + 2.6, terrainHeight(camp.x, camp.z) + 1.1, oz + 1.6);
+        }
       }
     }
+
+    this.campLight.intensity = nearestCamp < 60
+      ? 2.2 + Math.sin(this.time * 13) * 0.6 : 0;
 
     this._updateWeather(dt, px, pz);
     this._updateNearGrass(px, pz);
@@ -1237,6 +1292,33 @@ export class World {
     this.sun.position.z += pz;
   }
 
+  /**
+   * Попросить света для точки. Заявки собираются за кадр, ближайшие
+   * получают лампы из пула, остальные обходятся. Вызывать можно
+   * сколько угодно раз: лампы в сцене от этого не прибавляется.
+   */
+  requestGlow(x, y, z, color, intensity, d2) {
+    this._glowClaims.push({ x, y, z, color, intensity, d2 });
+  }
+
+  /** Раздать пул ближайшим заявкам. Вызывается в конце кадра. */
+  applyGlow() {
+    const c = this._glowClaims;
+    if (c.length > 1) c.sort((a, b) => a.d2 - b.d2);
+    for (let i = 0; i < this.glowLights.length; i++) {
+      const l = this.glowLights[i];
+      const q = c[i];
+      if (q) {
+        l.position.set(q.x, q.y, q.z);
+        l.color.setHex(q.color);
+        l.intensity = q.intensity;
+      } else {
+        l.intensity = 0;
+      }
+    }
+    c.length = 0;
+  }
+
   /** Видимость грибов по дистанции + возврат ближайшего в прицеле. */
   updateMushrooms(px, pz, dt) {
     const showR = 48, showR2 = showR * showR;
@@ -1254,7 +1336,6 @@ export class World {
           if (m.respawn <= 0) {
             m.picked = false;
             m.mesh.scale.setScalar(1);
-            if (m.light) m.light.visible = true;
           } else continue;
         }
         const dx = gx + m.mesh.position.x - px;
@@ -1264,7 +1345,10 @@ export class World {
         m.mesh.visible = vis;
         // «грибное чутьё»: близкие грибы чуть светятся, иначе трава их прячет
         if (vis) m.mesh.material = d2 < 256 ? MAT_MUSHROOM_NEAR : MAT_MUSHROOM;
-        if (m.light) m.light.visible = vis && dx * dx + dz * dz < 900;
+        if (m.glow && vis && d2 < 900) {
+          this.requestGlow(gx + m.mesh.position.x, m.mesh.position.y + 0.3,
+            gz + m.mesh.position.z, m.glow, 1.1, d2);
+        }
       }
     }
   }
@@ -1301,7 +1385,6 @@ export class World {
     // в дождь грибы лезут заметно бодрее
     m.respawn = (34 + Math.random() * 46) * (1 - (this.wet || 0) * 0.45);
     m.mesh.scale.setScalar(0.0001);
-    if (m.light) m.light.visible = false;
   }
 
   /** Простая коллизия со стволами: выталкивает точку из круга ствола. */
