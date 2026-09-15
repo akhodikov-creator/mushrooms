@@ -305,7 +305,7 @@ export class Game {
     if (!r) { UI.toast('Тара пустая — нечего сдавать', 'warn'); return; }
     Audio.upgrade();
     UI.toast(`Сдано ${r.items} шт. → <b>+${fmtNum(r.value)}</b>`, 'good');
-    UI.toast(`<q>${this._buyerLine(r)}</q><i>скупщик</i>`, 'buyer');
+    UI.buyerSay(this._buyerLine(r));
     if (r.upgraded) {
       UI.banner(r.upgraded.icon + '  ' + r.upgraded.name.toUpperCase(),
         `Вместимость ${r.upgraded.cap} · множитель ×${r.upgraded.mult.toFixed(2)}`, 3200, 'good');

@@ -18,6 +18,7 @@ export const UI = {
       'sens', 'sens-val', 'vol', 'vol-val', 'quality', 'vignette', 'end-sub', 'threat-ring',
       'level-num', 'level-fill', 'buffs', 'threat-arrow', 'radar-label', 'now-cue',
       'bag', 'bag-body', 'bag-cap', 'weather', 'lamp',
+      'buyer-say', 'buyer-say-text',
     ];
     for (const id of ids) this.el[id] = $(id);
     this.radarCtx = this.el.radar ? this.el.radar.getContext('2d') : null;
@@ -190,6 +191,15 @@ export const UI = {
       setTimeout(() => d.remove(), 400);
     }, 2300);
     while (this.el.toasts.children.length > 7) this.el.toasts.firstChild.remove();
+  },
+
+  /** Реплика скупщика по центру экрана. */
+  buyerSay(text, ms = 3000) {
+    if (!this.el['buyer-say']) return;
+    this.el['buyer-say-text'].textContent = text;
+    this.el['buyer-say'].classList.add('show');
+    clearTimeout(this._buyerT);
+    this._buyerT = setTimeout(() => this.el['buyer-say'].classList.remove('show'), ms);
   },
 
   banner(title, sub = '', ms = 2200, cls = '') {

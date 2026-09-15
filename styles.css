@@ -442,10 +442,6 @@ ul.keys em{color:var(--gold);font-style:normal}
 .toast.bad{border-left-color:var(--red)}
 .toast.warn{border-left-color:#e8a030}
 .toast.info{border-left-color:#4a90c0}
-/* реплика скупщика: курсив и серая приписка с именем */
-.toast.buyer{border-left-color:#9a7a4a;background:rgba(42,34,22,.86)}
-.toast.buyer q{font-style:italic;quotes:none}
-.toast.buyer q:before{content:'— '}
 
 /* баннер */
 .banner{
@@ -470,6 +466,27 @@ ul.keys em{color:var(--gold);font-style:normal}
   color:var(--gold);font-size:64px;font-style:italic;
   text-shadow:0 0 44px rgba(255,190,60,.75),0 4px 26px rgba(0,0,0,.9);
 }
+
+/* Реплика скупщика — по центру экрана, белым.
+   В углу среди тостов её просто не читали. */
+.buyer-say{
+  position:absolute;left:50%;top:38%;transform:translate(-50%,-6px) scale(.97);
+  max-width:min(620px,84vw);padding:18px 26px 14px;
+  background:rgba(14,16,14,.82);border:1px solid rgba(220,225,210,.22);
+  border-radius:14px;box-shadow:0 18px 60px rgba(0,0,0,.6);
+  text-align:center;opacity:0;pointer-events:none;
+  transition:opacity .22s,transform .22s;
+}
+.buyer-say.show{opacity:1;transform:translate(-50%,0) scale(1)}
+#buyer-say-text{
+  color:#fff;font-size:26px;line-height:1.25;font-weight:600;
+  text-shadow:0 2px 18px rgba(0,0,0,.9);
+}
+.buyer-say .who{
+  margin-top:8px;color:rgba(255,255,255,.5);
+  font-size:12px;letter-spacing:.16em;text-transform:uppercase;
+}
+@media (max-width:760px){ #buyer-say-text{font-size:19px} }
 
 /* прокрутка */
 ::-webkit-scrollbar{width:9px}

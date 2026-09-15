@@ -6,7 +6,7 @@ import {
   wrapDelta, wrapCoord, clamp, lerp, dampTo, torusDist2,
 } from './utils.js';
 import {
-  generateChunkMushrooms, getMushroomGeometry,
+  generateChunkMushrooms, getMushroomGeometry, SPECIES, GEO_VARIANTS,
   MAT_MUSHROOM, MAT_MUSHROOM_NEAR, MAT_MUSHROOM_HL,
 } from './mushrooms.js';
 import {
@@ -413,6 +413,60 @@ function fillUaz(node) {
   node.add(new THREE.Mesh(mergeParts(p), MAT.prop));
 }
 
+/**
+ * Гора сданных грибов у приёмного пункта: те же модели, что растут
+ * в лесу, просто свалены в кучу и развёрнуты как попало. Шляпки
+ * держат вершинный цвет, поэтому вся гора собирается в один меш.
+ *
+ * Геометрия общая на все пункты: гриб — модель подробная, и четыре
+ * своих кучи стоили бы полмиллиона вершин.
+ */
+let pileGeo = null;
+
+function mushroomPileGeometry() {
+  if (pileGeo) return pileGeo;
+
+  const kinds = SPECIES.filter((sp) => sp.price > 0);
+  const parts = [];
+  const R = 0.38, H = 0.55;   // куча, а не россыпь: узкая и высокая
+  const m = new THREE.Matrix4();
+  const q = new THREE.Quaternion();
+  const e = new THREE.Euler();
+  const pos = new THREE.Vector3();
+  const scl = new THREE.Vector3();
+
+  for (let i = 0; i < 44; i++) {
+    const sp = kinds[(Math.random() * kinds.length) | 0];
+    const geo = getMushroomGeometry(sp, (Math.random() * GEO_VARIANTS) | 0).clone();
+    // куполом: к краю кучи ниже
+    const a = Math.random() * TAU;
+    const r = R * Math.sqrt(Math.random());
+    const t = 1 - r / R;
+    const y = H * t * t * (0.35 + 0.65 * Math.random());
+    // валяются боком: кувыркать вокруг всех осей нельзя, половина
+    // уйдёт шляпками в землю
+    e.set((Math.random() - 0.5) * 2.6, Math.random() * TAU, (Math.random() - 0.5) * 2.6);
+    q.setFromEuler(e);
+    const k = 0.85 + Math.random() * 0.3;
+    scl.set(k, k, k);
+    pos.set(Math.cos(a) * r, y, Math.sin(a) * r);
+    geo.applyMatrix4(m.compose(pos, q, scl));
+    parts.push(geo);
+  }
+
+  pileGeo = mergeParts(parts);
+  // сажаем кучу на землю: после кувырков нижняя точка уходит в минус
+  pileGeo.computeBoundingBox();
+  pileGeo.translate(0, -pileGeo.boundingBox.min.y, 0);
+  return pileGeo;
+}
+
+function buildMushroomPile() {
+  const mesh = new THREE.Mesh(mushroomPileGeometry(), MAT_MUSHROOM);
+  mesh.position.set(-3.5, 0, 0.3);
+  return mesh;
+}
+
 function buildCamp() {
   const g = new THREE.Group();
   const p = [];
@@ -423,11 +477,8 @@ function buildCamp() {
   onAsset('uaz', () => fillUaz(uaz));
   g.add(uaz);
 
-  // палатка-скупка
-  const tent = new THREE.ConeGeometry(2.1, 2.0, 4);
-  tent.rotateY(Math.PI / 4);
-  tent.translate(-4.2, 1.0, 0);
-  p.push(paint(tent, 0x7a5a30, 0.1));
+  // гора сданного
+  g.add(buildMushroomPile());
 
   // весы и ящики
   for (let i = 0; i < 5; i++) {
