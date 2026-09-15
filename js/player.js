@@ -252,10 +252,9 @@ export class Player {
   }
 
   reset() {
-    const c = [
-      { x: 190, z: 224 }, { x: 690, z: 204 }, { x: 200, z: 704 }, { x: 700, z: 714 },
-    ][(Math.random() * 4) | 0];
-    this.x = c.x; this.z = c.z;
+    // Куда встать — решает game.start(): точка общая для всех, кто
+    // играет сегодня. Случайный выбор из четырёх углов сводил на нет
+    // весь смысл общего леса: один стартовал у бора, другой у болота.
     this.y = terrainHeight(this.x, this.z);
     this.hp = CONFIG.maxHp;
     this.stamina = CONFIG.maxStamina;

@@ -1,4 +1,5 @@
 import { CONFIG, CONTAINERS } from './config.js';
+import { demandMult } from './mushrooms.js';
 import { clamp } from './utils.js';
 
 export class Inventory {
@@ -101,7 +102,7 @@ export class Inventory {
       this.bestStreak = Math.max(this.bestStreak, this.streak);
       // множитель на табло — это то, что игрок получает ПРЯМО СЕЙЧАС;
       // растёт он уже для следующего гриба
-      gained = sp.price * this.totalMult;
+      gained = sp.price * this.totalMult * demandMult(sp);
       this.combo = Math.min(CONFIG.comboMax, this.combo + CONFIG.comboStep);
       this.comboT = CONFIG.comboWindow;
       this.carryValue += gained;

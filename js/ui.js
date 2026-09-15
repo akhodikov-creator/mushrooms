@@ -16,9 +16,9 @@ export const UI = {
       'hurt', 'banner', 'banner-title', 'banner-sub', 'end-title', 'end-body', 'end-board',
       'radar', 'hp-num', 'tab-board', 'btn-again', 'btn-menu', 'btn-resume', 'btn-quit',
       'sens', 'sens-val', 'vol', 'vol-val', 'quality', 'vignette', 'end-sub', 'threat-ring',
-      'level-num', 'level-fill', 'buffs', 'threat-arrow', 'radar-label', 'now-cue',
+      'level-num', 'level-fill', 'buffs', 'threat-arrow', 'radar-label', 'biome-label', 'now-cue',
       'bag', 'bag-body', 'bag-cap', 'weather', 'lamp',
-      'buyer-say', 'buyer-say-text', 'perf', 'day-label',
+      'buyer-say', 'buyer-say-text', 'perf', 'day-label', 'demand-label',
     ];
     for (const id of ids) this.el[id] = $(id);
     this.radarCtx = this.el.radar ? this.el.radar.getContext('2d') : null;
@@ -193,9 +193,17 @@ export const UI = {
     while (this.el.toasts.children.length > 7) this.el.toasts.firstChild.remove();
   },
 
+  /** Какой лес под ногами — подпись под радаром. */
+  setBiome(name) {
+    if (this._biome === name) return;          // в DOM пишем только на смене
+    this._biome = name;
+    if (this.el['biome-label']) this.el['biome-label'].textContent = name;
+  },
+
   /** Лес дня на стартовом экране: он общий для всех, кто играет сегодня. */
-  setDayLabel(text) {
+  setDayLabel(text, demand) {
     if (this.el['day-label']) this.el['day-label'].textContent = 'лес на ' + text + ' — у всех одинаковый';
+    if (this.el['demand-label']) this.el['demand-label'].textContent = demand || '';
   },
 
   /** Реплика скупщика по центру экрана. */

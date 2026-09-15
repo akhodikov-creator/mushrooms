@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { CONFIG, CONTAINERS } from './config.js';
 import { Audio } from './audio.js';
 import { UI } from './ui.js';
-import { World, CAMPS, applyEnvMap } from './world.js';
+import { World, CAMPS, spawnPoint, applyEnvMap } from './world.js';
 import { Player } from './player.js';
 import { AnimalManager, KINDS, applyAnimalEnv, animalWarmupModels } from './animals.js';
 import { Weapons, applyWeaponEnv } from './weapons.js';
@@ -11,7 +11,10 @@ import { Body, applyBodyEnv } from './body.js';
 import { Inventory } from './inventory.js';
 import { Leaderboard } from './leaderboard.js';
 import { MAT_MUSHROOM_HL, SPECIES_BY_ID, applyMushroomEnv } from './mushrooms.js';
-import { clamp, lerp, dampTo, fmtNum, terrainHeight, wrapDelta, isWater } from './utils.js';
+import {
+  clamp, lerp, dampTo, fmtNum, terrainHeight, wrapDelta, isWater,
+  forestType, FOREST_NAME,
+} from './utils.js';
 
 /* ============================================================
    Скупщик у УАЗа. Принимает всё и всегда ворчит, сколько ни принеси —
@@ -794,6 +797,8 @@ export class Game {
     Audio.resume();
     Audio.startAmbient();
     this.inv.reset();
+    const sp = spawnPoint();
+    this.player.x = sp.x; this.player.z = sp.z;
     this.player.reset();
     this.weapons.reset();
     this.body.reset();
@@ -1126,6 +1131,7 @@ export class Game {
     UI.setLevel(this.inv);
     UI.setBuffs(this.effects);
     UI.updateRadar(p, CAMPS, this.animals.list, this.pickups.list, this.radarRange || 130);
+    UI.setBiome(FOREST_NAME[forestType(p.x, p.z)]);
 
     // --- конец дня ---
     if (left <= 0) this._end(false, 'Солнце село. Ты дошёл до вечера живым.');

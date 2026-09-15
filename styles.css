@@ -232,6 +232,14 @@ ul.keys em{color:var(--gold);font-style:normal}
   text-shadow:0 2px 8px rgba(0,0,0,.9);
 }
 
+/* Какой лес под ногами. Без этой строки правило «боровик — в бору,
+   подосиновик — в осиннике» игрок не считывает: видит, что грибы
+   где-то есть, а где-то нет, и не понимает почему. */
+#biome-label{
+  margin-top:2px;font-size:11px;font-weight:700;color:#cfe8b0;
+  text-shadow:0 2px 8px rgba(0,0,0,.9);
+}
+
 /* активные бонусы */
 #buffs{
   position:absolute;top:222px;right:16px;
@@ -468,6 +476,7 @@ ul.keys em{color:var(--gold);font-style:normal}
 }
 
 .sub.day{color:var(--gold);opacity:.85;font-size:12px;margin-top:2px}
+.sub.demand{color:#9fe05a;opacity:.9;font-size:12px;margin-top:1px}
 
 /* Счётчик кадров (F3) */
 .perf{

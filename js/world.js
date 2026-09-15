@@ -17,9 +17,56 @@ import { onAsset, instance } from './assets.js';
 
 const CS = CONFIG.chunkSize;
 const GRID = Math.round(WS / CS);          // 8
+/* Приёмные пункты. Координаты не жёсткие: рельеф теперь свой на
+   каждый день, и на фиксированных точках пункты то и дело оказывались
+   в озере — проверка на двадцати днях показала день, где под воду ушли
+   все четыре. Место ищется заново под сегодняшний рельеф. */
 export const CAMPS = [
   { x: 190, z: 210 }, { x: 690, z: 190 }, { x: 200, z: 690 }, { x: 700, z: 700 },
 ];
+
+/**
+ * Ставит пункты на сухие ровные места — по одному на четверть карты.
+ * Перебор детерминированный, по решётке: значит, у всех игроков в один
+ * день пункты стоят одинаково, и общая доска остаётся честной.
+ */
+export function placeCamps() {
+  const quads = [[0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75]];
+  quads.forEach((q, i) => {
+    const cx = q[0] * WS, cz = q[1] * WS;
+    let best = null;
+    for (let dx = -110; dx <= 110; dx += 10) {
+      for (let dz = -110; dz <= 110; dz += 10) {
+        const x = wrapCoord(cx + dx), z = wrapCoord(cz + dz);
+        const h = terrainHeight(x, z);
+        if (h < WATER_LEVEL + 3.5) continue;          // с запасом от берега
+        // вокруг тоже должно быть сухо и ровно: пункту нужна поляна
+        let ok = true, rough = 0;
+        for (let a = 0; a < TAU; a += TAU / 8) {
+          const px = x + Math.cos(a) * 14, pz = z + Math.sin(a) * 14;
+          if (terrainHeight(px, pz) < WATER_LEVEL + 2) { ok = false; break; }
+          rough += Math.abs(terrainHeight(px, pz) - h);
+        }
+        if (!ok) continue;
+        const score = -rough - Math.hypot(dx, dz) * 0.02;
+        if (!best || score > best.score) best = { x, z, score };
+      }
+    }
+    if (best) { CAMPS[i].x = best.x; CAMPS[i].z = best.z; }
+  });
+}
+
+/** Откуда начинается забег — у первого пункта, одинаково для всех. */
+export function spawnPoint() {
+  const c = CAMPS[0];
+  for (let r = 14; r <= 40; r += 6) {
+    for (let a = 0; a < TAU; a += TAU / 12) {
+      const x = wrapCoord(c.x + Math.cos(a) * r), z = wrapCoord(c.z + Math.sin(a) * r);
+      if (terrainHeight(x, z) > WATER_LEVEL + 2.5) return { x, z };
+    }
+  }
+  return { x: c.x, z: c.z };
+}
 
 /* ============================================================
    Материалы и ветер
@@ -870,6 +917,8 @@ const NG_BIOME = [
 export class World {
   constructor(scene) {
     this.scene = scene;
+    // до всего остального: от места пунктов зависят поляны в чанках
+    placeCamps();
     this.chunks = new Map();
     this.root = new THREE.Group();
     scene.add(this.root);

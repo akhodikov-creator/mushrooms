@@ -4,17 +4,19 @@ import { UI } from './ui.js';
 import { Leaderboard } from './leaderboard.js';
 import { Game } from './game.js';
 import { warmAssets } from './assets.js';
+import { setDemand, demandLabel } from './mushrooms.js';
 import { setDaySeed, todaySeed, seedLabel } from './utils.js';
 
 /* Лес дня задаётся ДО всего остального: от сида зависит рельеф, а от
    рельефа — вода, лагеря, деревья и грибные места. */
 setDaySeed(todaySeed());
+setDemand(todaySeed());
 
 UI.init();
 
 /* Лес дня — на стартовом экране: у всех, кто играет сегодня, он один
    и тот же, иначе общая доска ничего не значит. */
-UI.setDayLabel(seedLabel(todaySeed()));
+UI.setDayLabel(seedLabel(todaySeed()), demandLabel());
 
 /* ---------- настройки ---------- */
 const saved = Leaderboard.getSettings();

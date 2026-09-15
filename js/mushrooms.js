@@ -352,6 +352,41 @@ export function applyMushroomEnv(env) {
 const totalW = SPECIES.reduce((a, s) => a + s.weight, 0);
 
 /* ============================================================
+   Спрос дня.
+
+   У скупщика каждый день свой интерес: сегодня в цене белые, завтра
+   лисички. Лес у всех один, а задача разная — ради этого и стоит
+   заходить назавтра. Выбирается из сида дня, значит у всех совпадает.
+   ============================================================ */
+let DEMAND = { up: null, down: null };
+
+export function setDemand(seed) {
+  const r = rng((seed ^ 0x51ed2701) >>> 0);
+  // торгуют съедобным: спрос на поганку смысла не имеет
+  const good = SPECIES.filter((sp) => sp.price > 0);
+  const up = good[(r() * good.length) | 0];
+  let down = good[(r() * good.length) | 0];
+  for (let i = 0; i < 6 && down === up; i++) down = good[(r() * good.length) | 0];
+  DEMAND = { up, down };
+}
+
+export const demand = () => DEMAND;
+
+/** Надбавка скупщика за конкретный вид. */
+export function demandMult(sp) {
+  if (sp === DEMAND.up) return 1.5;
+  if (sp === DEMAND.down) return 0.6;
+  return 1;
+}
+
+/** Строка для стартового экрана. */
+export function demandLabel() {
+  if (!DEMAND.up) return '';
+  return `сегодня берут ${DEMAND.up.name.toLowerCase()} в полтора раза дороже, ` +
+    `${DEMAND.down.name.toLowerCase()} — за полцены`;
+}
+
+/* ============================================================
    Где какой гриб растёт.
 
    Порядок весов: бор, ельник, березняк, осинник, поляна, низина.
@@ -410,6 +445,9 @@ export function pickSpecies(rnd, x, z, nearStump, openMeadow) {
 }
 
 /** Размещает грибы в пределах чанка. Возвращает описания (без мешей). */
+// густота по выделам: бор, ельник, березняк, осинник, поляна, низина
+const BIOME_DENSITY = [0.72, 1.0, 0.95, 0.88, 0.28, 0.45];
+
 export function generateChunkMushrooms(cx, cz, stumps) {
   const cs = CONFIG.chunkSize;
   const rnd = rng(((cx * 73856093) ^ (cz * 19349663) ^ 0x5ee5) >>> 0);
@@ -423,6 +461,10 @@ export function generateChunkMushrooms(cx, cz, stumps) {
       tries++;
     } while (isWater(wx, wz) && tries < 8);
     if (isWater(wx, wz)) continue;
+    // Грибов поровну везде не бывает: в ельнике и березняке густо, на
+    // сухой поляне и в низине почти пусто. Ровная сетка по всему лесу
+    // лишала смысла выбор, куда идти.
+    if (rnd() > BIOME_DENSITY[forestType(wx, wz)]) continue;
 
     // рядом ли пень (опята/вешенки растут на них)
     let nearStump = null;

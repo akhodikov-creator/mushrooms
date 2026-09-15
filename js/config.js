@@ -186,7 +186,7 @@ export const CONFIG = {
   maxLevel: 12,
 
   // --- плотность ---
-  mushroomsPerChunk: 62,
+  mushroomsPerChunk: 76,   // часть отсеется по выделу, см. BIOME_DENSITY
   treesPerChunk: 46,
   grassPerChunk: 520,
   bushesPerChunk: 16,
