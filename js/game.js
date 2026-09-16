@@ -282,8 +282,13 @@ export class Game {
       this._summonBear(m);
     } else if (sp.summons === 'boar') {
       const a = this.animals.spawnNear('boar', this.player.x, this.player.z, 22);
-      UI.banner('ХРЮ?!', 'Кабан услышал, как ты сорвал сатанинский гриб', 2400, 'bad');
-      this.shake = Math.max(this.shake, 0.4);
+      // Небо наливается кровью, и это хуже кабана: кабан уйдёт, а
+      // красный лес держится полминуты — всё это время не понимаешь,
+      // кончилось уже или нет.
+      this.world.bloodSky(28);
+      Audio.omen();
+      UI.banner('НЕБО ПОКРАСНЕЛО', 'Сатанинский гриб разбудил кабана', 2800, 'bad');
+      this.shake = Math.max(this.shake, 0.55);
     }
   }
 

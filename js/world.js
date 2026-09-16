@@ -10,7 +10,7 @@ import {
   MAT_MUSHROOM, MAT_MUSHROOM_NEAR, MAT_MUSHROOM_HL,
 } from './mushrooms.js';
 import {
-  groundTex, barkTex, birchTex, grassTex, leafTex, needleTex,
+  groundTex, barkTex, birchTex, grassTex, leafTex, needleTex, lichenTex,
   metalTex, woodTex, getEnvMap,
 } from './textures.js';
 import { onAsset, instance } from './assets.js';
@@ -123,7 +123,12 @@ const MAT = {
   // Ягель — не трава: плотная белёсая подушка без прозрачности и без
   // колыхания на ветру. Отдельный материал нужен именно поэтому:
   // под зелёной текстурой травы белый мох белым не читается.
-  moss: new THREE.MeshLambertMaterial({ vertexColors: true }),
+  // Ягель кладётся плоскими пятнами внахлёст, поэтому нужен вырез по
+  // альфе. Прозрачность именно отсечением, а не смешиванием: пятен под
+  // ногами под две тысячи, и сортировать их каждый кадр незачем.
+  moss: new THREE.MeshLambertMaterial({
+    vertexColors: true, map: lichenTex(), alphaTest: 0.4, side: THREE.DoubleSide,
+  }),
   grass: addWind(new THREE.MeshLambertMaterial({
     vertexColors: true, map: grassTex(), alphaTest: 0.4,
     side: THREE.DoubleSide,
@@ -303,21 +308,25 @@ function buildAspen() {
 }
 
 /** Пучок травы: скрещённые квады с текстурой травинок. */
-/** Подушка ягеля: приплюснутый комок с неровными боками. */
+/**
+ * Пятно ягеля.
+ *
+ * Раньше это был приплюснутый многогранник. Грани выходили по полметра
+ * и бликовали плоскостями — в бору лежали не подушки лишайника, а
+ * смятые листы бумаги; случайный завал набок, которым это лечили,
+ * только показывал плоскую изнанку. Купол вместо многогранника убрал
+ * бумагу, но принёс твёрдую кромку, и ягель стал грудой камней.
+ *
+ * Работает третий подход: плоское пятно с рваным краем, вырезанным по
+ * альфе. Положенные внахлёст, они сливаются в сплошной покров — ягель
+ * так и растёт. Заодно два треугольника вместо полусотни: ковёр в бору
+ * почти две тысячи пятен, и это разница в сто тысяч треугольников.
+ */
 function buildMossPad() {
-  const g = new THREE.IcosahedronGeometry(0.17, 0);
-  const p = g.attributes.position;
-  // Только шевелим вершины: обрубать нижнюю половину нельзя, грани
-  // схлопываются и нормали уходят в никуда — подушки чернеют.
-  for (let i = 0; i < p.count; i++) {
-    const n = 0.74 + ((Math.sin(i * 12.9898) * 43758.5453) % 1) * 0.5;
-    p.setXYZ(i, p.getX(i) * n, p.getY(i) * n, p.getZ(i) * n);
-  }
-  g.scale(1, 0.72, 1);
-  g.translate(0, 0.085, 0);
-  g.computeVertexNormals();
+  const g = new THREE.PlaneGeometry(1, 1, 1, 1);
+  g.rotateX(-Math.PI / 2);
   // Белый вершинный цвет обязателен: материал объявлен vertexColors,
-  // и без атрибута WebGL подставляет чёрный — подушки выходят углями.
+  // и без атрибута WebGL подставляет чёрный — пятна выходят углями.
   return paint(g, 0xffffff);
 }
 
@@ -1143,6 +1152,12 @@ export class World {
     this._buildNearGrass();
     this._buildRain();
 
+    // Кровавое небо: сорвал сатанинский гриб — на минуту темнеет и
+    // краснеет весь свет. Держим отдельным числом, а не погодой:
+    // погода живёт своей жизнью и не должна это затирать.
+    this.blood = 0;
+    this.bloodT = 0;
+
     // погода: 0 — ясно, 1 — стена воды
     this.weather = 'clear';
     this.wet = 0;
@@ -1402,18 +1417,28 @@ export class World {
           // В бору землю кроет ягель, а не трава. Подушки лежат НА
           // земле и перекрывают друг друга: травинку можно утопить,
           // а редкие плоские комки читаются клочками бумаги, а не мхом.
-          const sm = 0.65 + r3 * 0.8;
-          v.y = terrainHeight(wx, wz) + 0.01;
-          sc.set(sm * 2.8, sm * 1.4, sm * 2.8);
-          // лёгкий завал набок: строго горизонтальные комки читаются
-          // разбросанными листами бумаги
-          this._ngTilt.set((r2 - 0.5) * 0.5, r1 * TAU, (r1 - 0.5) * 0.5);
-          q.setFromEuler(this._ngTilt);
-          mo.setMatrixAt(mk, m4.compose(v, q, sc));
+          // Подушки поменьше и погуще: одна большая читалась предметом,
+          // а ягель — это сплошной ковёр, из которого торчат сосны.
+          // Подушки должны смыкаться: ягель — сплошной ковёр, из
+          // которого торчат сосны, а не разложенные по траве камни.
+          // При шаге сетки в метр диаметр меньше метра оставляет между
+          // ними зелёные проплешины.
+          // Пятна должны перекрываться: при шаге сетки в метр пятно
+          // меньше метра оставляет между собой зелёные проплешины, и
+          // ковёр рассыпается на отдельные кляксы.
+          const sm = 1.15 + r3 * 0.75;
+          v.y = terrainHeight(wx, wz) + 0.02;
+          sc.set(sm, 1, sm);
+          // Завал набок убран: он показывал плоскую изнанку и добивал
+          // сходство с бумагой. Достаточно поворота вокруг вертикали.
           q.setFromAxisAngle(this._ngAxis, r1 * TAU);
-          // не белый лист, а белёсо-зелёный мох
-          const g0 = 0.80 + r2 * 0.16;
-          mo.setColorAt(mk, col.setRGB(g0 * 0.97, g0, g0 * 0.86));
+          mo.setMatrixAt(mk, m4.compose(v, q, sc));
+          // Не белый лист, а бледная серо-зелёная губка. Чистый белый в
+          // солнце выбивался в пересвет и слепил сильнее снега.
+          // Бор-беломошник и правда белёсый, но в полном солнце чистый
+          // белый выбивался в пересвет и слепил сильнее снега.
+          const g0 = 0.60 + r2 * 0.24;
+          mo.setColorAt(mk, col.setRGB(g0 * 0.97, g0, g0 * 0.84));
           mk++;
           continue;
         }
@@ -1511,6 +1536,10 @@ export class World {
     this.root.add(this.campLight);
 
     this.hemi = new THREE.HemisphereLight(0x9fc0e8, 0x3a4426, 0.72);
+    // Цвет солнца пересчитывается каждый кадр с нуля, а полусферный —
+    // нет. Держим исходный отдельно, иначе подмешанный красный
+    // накапливался бы и оставался в лесу навсегда.
+    this.hemiBase = this.hemi.color.clone();
     this.scene.add(this.hemi);
     this.ambient = new THREE.AmbientLight(0xffffff, 0.22);
     this.scene.add(this.ambient);
@@ -1595,6 +1624,26 @@ export class World {
       this.sun.intensity *= 1 - wf * 0.55;
       this.hemi.intensity *= 1 - wf * 0.2;
     }
+    // Кровавое небо. Подмешивается последним, поверх времени суток и
+    // погоды: сатанинский гриб должен перекрывать всё, в том числе
+    // ясный полдень. Солнце при этом гасим — от красного света в
+    // полную силу лес выглядит нарядно, а не тревожно.
+    const bl = this.blood || 0;
+    if (bl > 0.005) {
+      const верх = new THREE.Color(0x4a0606), низ = new THREE.Color(0x8c1608);
+      this.skyMat.uniforms.top.value.lerp(верх, bl * 0.92);
+      this.skyMat.uniforms.bottom.value.lerp(низ, bl * 0.88);
+      this.skyMat.uniforms.sunCol.value.lerp(new THREE.Color(0xff3a14), bl * 0.9);
+      this.sun.color.lerp(new THREE.Color(0xff4a1e), bl * 0.85);
+      this.sun.intensity *= 1 - bl * 0.45;
+      this.hemi.color.copy(this.hemiBase).lerp(new THREE.Color(0xff5a30), bl * 0.7);
+      this.hemi.intensity *= 1 - bl * 0.35;
+      scene.fog.color.lerp(new THREE.Color(0x63110b), bl * 0.85);
+      scene.fog.far *= 1 - bl * 0.3;          // горизонт придвигается
+    } else if (this.hemiBase) {
+      this.hemi.color.copy(this.hemiBase);
+    }
+
     if (night > 0.01) {
       scene.fog.color.lerp(new THREE.Color(0x0a0e18), night * 0.9);
       scene.fog.far *= 1 - night * 0.45;
@@ -1603,8 +1652,18 @@ export class World {
   }
 
   /** Перекладывает чанки и пункты вокруг игрока (зацикливание мира). */
+  /** Небо наливается кровью на sec секунд. Повтор продлевает, а не складывает. */
+  bloodSky(sec = 26) {
+    this.bloodT = Math.max(this.bloodT, sec);
+  }
+
   update(px, pz, dt, dayT, camera) {
     this.time += dt;
+    // Наплыв быстрый, отпускает медленно: пугать надо резко, а
+    // возвращать лес в норму — так, чтобы игрок этого не заметил.
+    if (this.bloodT > 0) this.bloodT -= dt;
+    const мишень = this.bloodT > 0 ? 1 : 0;
+    this.blood = dampTo(this.blood, мишень, мишень ? 0.28 : 2.6, dt);
     windUniform.value = this.time * (1 + (this.windBoost || 0) * 1.6);
 
     const viewR = CONFIG.viewChunks;

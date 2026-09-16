@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><base href="../"><title>face</title>
+<style>html,body{margin:0;background:#14171c;color:#9fb;font:12px/1.5 monospace}
+#log{padding:6px 8px}canvas{display:block}</style>
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.168.0/build/three.module.js",
+"three/addons/":"https://cdn.jsdelivr.net/npm/three@0.168.0/examples/jsm/"}}
+</script></head><body>
+<div id="log">гружу…</div><canvas id="c"></canvas>
+<script type="module">
+/* Крупный план головы: ?url=, ?y= высота взгляда, ?r= отдаление. */
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+const q = new URLSearchParams(location.search);
+const URL_ = q.get('url') || 'assets/kopatych.glb';
+const CY = +(q.get('y') || 120), R = +(q.get('r') || 95);
+const log = (t) => { document.getElementById('log').textContent += '\n' + t; };
+new GLTFLoader().loadAsync(URL_).then((g) => {
+  const root = g.scene;
+  const sc = new THREE.Scene(); sc.background = new THREE.Color(0x14171c);
+  sc.add(new THREE.HemisphereLight(0xffffff, 0x445566, 1.9));
+  const d = new THREE.DirectionalLight(0xffffff, 2.1); d.position.set(0.4, 0.9, 1.2); sc.add(d);
+  const d2 = new THREE.DirectionalLight(0xffffff, 0.8); d2.position.set(-0.8, 0.2, 0.4); sc.add(d2);
+  sc.add(root);
+  const W = 840, H = 300;
+  const cv = document.getElementById('c');
+  const r = new THREE.WebGLRenderer({ canvas: cv, antialias: true, preserveDrawingBuffer: true });
+  r.setPixelRatio(1); r.setSize(W, H); r.setScissorTest(true); r.outputColorSpace = THREE.SRGBColorSpace;
+  r.setViewport(0,0,W,H); r.setScissor(0,0,W,H); r.setClearColor(0x14171c,1); r.clear();
+  const c = new THREE.Vector3(0, CY, 40);
+  const cam = new THREE.PerspectiveCamera(28, (W/3)/H, 1, 2000);
+  [[0,0.05,1],[0.55,0.1,0.9],[0,0.65,0.9]].forEach((v,i)=>{
+    r.setViewport(i*W/3,0,W/3,H); r.setScissor(i*W/3+1,1,W/3-2,H-2);
+    cam.position.set(c.x+v[0]*R, c.y+v[1]*R, c.z+v[2]*R);
+    cam.lookAt(c); cam.updateProjectionMatrix(); r.render(sc,cam);
+  });
+  log('в лоб · три четверти · сверху');
+  window.__ready = true;
+});
+</script></body></html>

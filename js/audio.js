@@ -328,6 +328,53 @@ export const Audio = {
 
   click() { this.tone({ freq: 640, to: 880, dur: 0.05, type: 'square', gain: 0.06 }); },
 
+  /**
+   * Дурной знак: сорван сатанинский гриб.
+   *
+   * Тревога держится не на громкости, а на двух вещах. Первая —
+   * биения: две пилы, расстроенные на полтора герца, дают медленное
+   * «уханье», от которого не по себе даже на тихой громкости. Вторая —
+   * малая секунда: тон и он же на полтона выше звучат грязно, и ухо
+   * читает это как «что-то не так». Сверху три удара сердца вразбежку.
+   */
+  omen() {
+    if (!ctx) return;
+    const t0 = ctx.currentTime;
+    const ДЛИТ = 4.6;
+
+    const шина = ctx.createGain();
+    шина.gain.setValueAtTime(0.0001, t0);
+    шина.gain.exponentialRampToValueAtTime(0.5, t0 + 0.7);   // наплыв
+    шина.gain.setValueAtTime(0.5, t0 + ДЛИТ * 0.45);
+    шина.gain.exponentialRampToValueAtTime(0.0001, t0 + ДЛИТ);
+    шина.connect(master);
+
+    // подрезаем верх: гул должен давить, а не свистеть
+    const фильтр = ctx.createBiquadFilter();
+    фильтр.type = 'lowpass';
+    фильтр.frequency.setValueAtTime(900, t0);
+    фильтр.frequency.exponentialRampToValueAtTime(180, t0 + ДЛИТ);
+    фильтр.Q.value = 1.4;
+    фильтр.connect(шина);
+
+    for (const [частота, громкость] of [[48.5, 0.34], [50, 0.34], [51.4, 0.2]]) {
+      const o = ctx.createOscillator();
+      o.type = 'sawtooth';
+      o.frequency.setValueAtTime(частота, t0);
+      // к концу всё сползает вниз — как будто земля уходит
+      o.frequency.exponentialRampToValueAtTime(частота * 0.72, t0 + ДЛИТ);
+      const g = ctx.createGain();
+      g.gain.value = громкость;
+      o.connect(g).connect(фильтр);
+      o.start(t0);
+      o.stop(t0 + ДЛИТ + 0.1);
+    }
+
+    for (let i = 0; i < 3; i++) {
+      this.tone({ freq: 70, to: 38, dur: 0.22, type: 'sine', gain: 0.3, delay: 0.25 + i * 0.62 });
+    }
+  },
+
   /* ---------- фон: ветер + птицы ---------- */
   startAmbient() {
     if (!ctx || ambientNodes) return;

@@ -87,10 +87,102 @@ function limb(len, rTop, rBot, col) {
    МОДЕЛИ. Ориентация: «вперёд» у всех зверей — это -Z.
    ============================================================ */
 
+/* ------------------------------------------------------------
+   Злое лицо Копатыча.
+
+   В мультфильме он добродушен: круглые глаза и улыбка дугой. В лесу
+   он медведь, который идёт на таран, и улыбка всё портит.
+
+   Переделывать файл не нужно. Части лица приезжают отдельными мешами
+   (в glb по мешу на материал), поэтому улыбку достаточно спрятать, а
+   брови и оскал подвесить к кости головы: она ведёт лицо на 99% веса,
+   и всё едет вместе с моделью в любом клипе. Повторная оснастка на
+   Mixamo не требуется — число вершин и веса не тронуты.
+
+   Числа ниже — координаты внутри модели; она приходит ростом 170 своих
+   единиц, подгонка масштаба висит на обёртке слота.
+   ------------------------------------------------------------ */
+const KOP = {
+  eyes: [[-15.7, 121.4], [9.7, 121.7]],   // центры глаз по x,y
+  eyeW: 26.3,                              // ширина глаза
+  browZ: 51.5,                             // брови лежат на выпуклости глаза
+  mouth: [-1.9, 96.6, 58],                 // куда сажать оскал
+};
+
+/** Меш лица по цвету материала: имена в glb ничего не говорят. */
+function kopPart(model, подходит) {
+  let found = null;
+  model.traverse((o) => {
+    if (found || !(o.isMesh || o.isSkinnedMesh)) return;
+    const m = Array.isArray(o.material) ? o.material[0] : o.material;
+    if (m && m.color && подходит(m.color)) found = o;
+  });
+  return found;
+}
+
+function makeKopatychAngry(model) {
+  const head = model.getObjectByName('mixamorigHead');
+  if (!head) return;
+
+  // тёмно-бордовая полоска рта — единственный материал с таким цветом
+  const mouth = kopPart(model, (c) => c.r > 0.01 && c.r < 0.09 && c.g < 0.02 && c.b < 0.02);
+  const pupil = kopPart(model, (c) => c.r < 0.02 && Math.abs(c.r - c.g) < 0.01 && Math.abs(c.g - c.b) < 0.01);
+  const white = kopPart(model, (c) => c.r > 0.9 && c.g > 0.9 && c.b > 0.9);
+  if (mouth) mouth.visible = false;                 // улыбку долой
+
+  const MAT_DARK = new THREE.MeshStandardMaterial({ color: 0x120303, roughness: 0.6 });
+  const MAT_TOOTH = new THREE.MeshStandardMaterial({ color: 0xf2ece0, roughness: 0.45 });
+
+  // Всё строим в координатах модели, а вешаем на кость: переводим одним
+  // общим преобразованием, чтобы не считать его для каждой детали.
+  const inner = model.children[0] || model;
+  model.updateWorldMatrix(true, true);
+  const toBone = new THREE.Matrix4().copy(head.matrixWorld).invert().multiply(inner.matrixWorld);
+
+  const parts = [];
+  const add = (geo, mat) => { geo.applyMatrix4(toBone); parts.push(new THREE.Mesh(geo, mat)); };
+
+  // Брови: внутренние концы опущены к переносице — это и читается злостью
+  const cx = (KOP.eyes[0][0] + KOP.eyes[1][0]) / 2;
+  for (const [ex, ey] of KOP.eyes) {
+    const b = new THREE.BoxGeometry(KOP.eyeW * 0.96, 4.6, 5.2);
+    // знак наклона зависит от того, с какой стороны от переносицы глаз
+    b.rotateZ(ex < cx ? -0.46 : 0.46);
+    b.translate(ex, ey + 8.2, KOP.browZ);
+    add(b, MAT_DARK);
+  }
+
+  // Оскал: тёмная пасть, вдавленная в морду, и четыре клыка
+  const maw = new THREE.SphereGeometry(16, 16, 10);
+  maw.scale(1, 0.46, 0.4);
+  maw.translate(KOP.mouth[0], KOP.mouth[1], KOP.mouth[2] + 3);
+  add(maw, MAT_DARK);
+  for (let i = 0; i < 4; i++) {
+    const t = (i - 1.5) / 1.5;                 // -1 … 1 по ширине пасти
+    const fang = new THREE.ConeGeometry(2.2, 6.2, 4);
+    const вниз = i % 2 === 0;                  // клыки вперемежку сверху и снизу
+    if (!вниз) fang.rotateX(Math.PI);
+    fang.translate(KOP.mouth[0] + t * 9.5,
+                   KOP.mouth[1] + (вниз ? 3.4 : -3.4),
+                   KOP.mouth[2] + 9);
+    add(fang, MAT_TOOTH);
+  }
+
+  for (const p of parts) {
+    p.castShadow = true;
+    p.frustumCulled = false;
+    p.name = 'angry';
+    head.add(p);
+  }
+  // зрачки пригодятся игре: перед тараном они наливаются красным
+  if (pupil) pupil.userData.role = 'pupil';
+  if (white) white.userData.role = 'eye';
+}
+
 /**
  * Медведь — Копатыч.
  *
- * Модель со скелетом и тремя клипами из Mixamo. Пока файл не приехал,
+ * Модель со скелетом и клипами из Mixamo. Пока файл не приехал,
  * работает прежний процедурный медведь: он и остаётся запаской, так
  * что сломать зверя ненадёжной сетью нельзя.
  */
@@ -106,6 +198,7 @@ function buildKopatych() {
     // вылезает наружу, и меш моргает. Пусть рисуется всегда.
     o.frustumCulled = false;
   });
+  makeKopatychAngry(model);
   g.add(model);
   const head = new THREE.Group();
   head.position.set(0, 1.3, 0);      // по ней считаются точные попадания
@@ -631,6 +724,18 @@ class Animal {
         }
       }
     }
+    // Зрачки медведя наливаются красным перед тараном. Материал у
+    // клонов общий с прототипом, поэтому здесь он копируется: иначе от
+    // одного разъярённого краснели бы разом все звери на карте.
+    this.rage = null;
+    this.rageK = 0;
+    m.g.traverse((o) => {
+      if (o.userData && o.userData.role === 'pupil' && o.material && o.material.emissive) {
+        o.material = o.material.clone();
+        this.rage = o.material;
+      }
+    });
+
     this.head = m.head;
     this.legs = m.legs;
     this.bodyMesh = m.bodyMesh;
@@ -1016,6 +1121,16 @@ class Animal {
       this._play(c[0], this.state === 'dead' ? 0.1 : 0.22, c[1]);
       this.g.rotation.z = 0;
       this.g.position.y = this.y;
+
+      // Взгляд наливается кровью в замахе и держится в таране. Мигает
+      // вдвое чаще пульса — так читается ярость, а не гирлянда.
+      if (this.rage) {
+        const зол = this.state === 'telegraph' ? 1 : this.state === 'charge' ? 0.8 : 0;
+        this.rageK = dampTo(this.rageK, зол, 0.16, dt);
+        const пульс = this.rageK * (0.78 + Math.sin(this.animT * 13) * 0.22);
+        this.rage.emissive.setRGB(пульс, пульс * 0.05, 0);
+        this.rage.emissiveIntensity = 1 + пульс * 2.4;
+      }
     } else {
       const rate = this.state === 'charge' ? 15 : running ? 7.5 : 2.2;
       const amp = this.state === 'charge' ? 0.95 : running ? 0.62 : 0.12;
