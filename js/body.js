@@ -11,6 +11,26 @@ import { dampTo, clamp } from './utils.js';
    с тарой. Всё висит на камере, поэтому едет вместе со взглядом.
    ============================================================ */
 
+/**
+ * Освобождает буферы поддерева.
+ *
+ * clear() и remove() только отцепляют объект от родителя — геометрия
+ * остаётся в видеопамяти до перезагрузки страницы. Тару пересобирают
+ * на каждый апгрейд и на каждый новый день (reset ставит tier = -1),
+ * так что за сессию из десятка забегов набирается десяток брошенных
+ * мешей. Материалы при этом не трогаем: они общие на всю игру, и
+ * освободить их значит обнулить заодно чужие меши.
+ */
+function disposeGeometries(node) {
+  node.traverse((o) => { if (o.isMesh && o.geometry) o.geometry.dispose(); });
+}
+
+/* Горка грибов в таре: материал один на всю игру. Раньше он заводился
+   заново вместе с мешем при каждой смене тары. */
+const MAT_FILL = new THREE.MeshStandardMaterial({
+  color: 0x9a6a3a, roughness: 0.85, metalness: 0,
+});
+
 /* Стенки вёдер и лукошка — открытые цилиндры без толщины. С обычным
    отсечением изнанки задняя стенка изнутри пропадала, и сквозь тару
    была видна трава: двусторонний материал закрывает дыру и не требует
@@ -350,6 +370,7 @@ export class Body {
   setContainer(tier) {
     if (this.tier === tier) return;
     this.tier = tier;
+    disposeGeometries(this.containerNode);
     this.containerNode.clear();
     // clear() выбросил и горку грибов — ссылку тоже надо сбросить,
     // иначе после апгрейда тары наполнение перестаёт показываться
@@ -370,9 +391,7 @@ export class Body {
     if (!this.fillMesh) {
       const g = new THREE.SphereGeometry(0.1, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2);
       g.scale(1, 0.45, 1);
-      this.fillMesh = new THREE.Mesh(g, new THREE.MeshStandardMaterial({
-        color: 0x9a6a3a, roughness: 0.85, metalness: 0,
-      }));
+      this.fillMesh = new THREE.Mesh(g, MAT_FILL);
       this.containerNode.add(this.fillMesh);
     }
     const def = CONTAINERS[this.tier];

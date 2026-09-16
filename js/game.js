@@ -355,8 +355,17 @@ export class Game {
    * заминка незаметна.
    */
   _warmup() {
-    const probes = new THREE.Group();
-    for (const g of animalWarmupModels()) probes.add(g);
+    // Пробники собираем один раз на сессию, а не на каждый новый день.
+    // У клона со скелетом своя текстура костей, и заводится она при
+    // первой же отрисовке. Клоны выбрасывались сразу после прогрева, а
+    // текстуры оставались: восемь штук за день, к пятому забегу сорок.
+    // Переиспользование заодно делает прогрев второго дня почти
+    // бесплатным — всё нужное уже лежит в видеопамяти.
+    let probes = this._probes;
+    if (!probes) {
+      probes = this._probes = new THREE.Group();
+      for (const g of animalWarmupModels()) probes.add(g);
+    }
     // ставим перед камерой: вне пирамиды видимости буферы не зальются
     const dir = new THREE.Vector3();
     this.camera.getWorldDirection(dir);
