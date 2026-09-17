@@ -27,7 +27,14 @@ body{
 /* ---------------- экраны ---------------- */
 .screen{
   position:fixed;inset:0;z-index:40;
-  display:flex;align-items:center;justify-content:center;
+  /* Центрируем панель автополями, а не align-items:center.
+     У флексбокса центрирование и прокрутка не дружат: когда содержимое
+     выше окна, верхняя часть уезжает ЗА начало прокрутки и до неё не
+     добраться ничем. На макбуке с панелью закладок и доком окно всего
+     около 650 пикселей, панель — за тысячу, и кнопка «В ЛЕС» вместе с
+     полем ника оказывалась в недосягаемости: игру нельзя было начать.
+     Автополя сжимаются до нуля, когда места нет, и ничего не срезают. */
+  display:flex;
   padding:24px;
   background:radial-gradient(ellipse at 50% 30%,rgba(20,34,20,.72),rgba(4,8,6,.94));
   backdrop-filter:blur(3px);
@@ -36,6 +43,7 @@ body{
 .screen[hidden]{display:none}
 .panel{
   width:100%;max-width:1000px;
+  margin:auto;
   background:var(--panel);
   border:1px solid var(--line);
   border-radius:18px;
@@ -99,6 +107,7 @@ button.primary:hover{background:linear-gradient(180deg,#93cd4c,#5b8c2c)}
 /* колонки */
 .cols{display:grid;grid-template-columns:1.15fr 1fr;gap:30px}
 @media (max-width:820px){.cols{grid-template-columns:1fr}}
+
 ul.keys{list-style:none;margin:0 0 16px;padding:0;font-size:14px;line-height:1.95;color:#cfdcc0}
 ul.keys b{
   display:inline-block;min-width:34px;text-align:center;
@@ -518,3 +527,76 @@ ul.keys em{color:var(--gold);font-style:normal}
 ::-webkit-scrollbar-track{background:rgba(0,0,0,.25)}
 ::-webkit-scrollbar-thumb{background:rgba(150,180,130,.28);border-radius:5px}
 ::-webkit-scrollbar-thumb:hover{background:rgba(150,180,130,.45)}
+
+/* ============================================================
+   Низкие окна
+   ============================================================
+   Панель в полный рост — 1079 пикселей, и это больше, чем окно почти
+   любого ноутбука: у макбука с панелью закладок и доком остаётся
+   600–750, у ноутбука с 1080p — около 950. Поэтому порог высокий. Стартовая панель в полный рост занимает больше
+   тысячи, и на макбуке друга кнопка «В ЛЕС» вместе с полем ника
+   оказывалась выше начала прокрутки — игру нельзя было запустить.
+   Саму недосягаемость чинит margin:auto у .panel (см. выше), а здесь
+   поджимаются отступы и кегль, чтобы главное помещалось сразу.
+
+   Блок держим последним в файле: он переопределяет обычные правила,
+   а при равной силе селектора побеждает тот, что ниже.
+   ============================================================ */
+/* Невысокие экраны. Ноутбук с панелью закладок и доком оставляет
+   браузеру 600–750 пикселей по высоте — этого мало для стартовой
+   панели в полный рост. Прокрутка после правки выше работает, но
+   искать кнопку «В ЛЕС» прокруткой всё равно неудобно: поджимаем
+   отступы и кегль, чтобы главное помещалось сразу. */
+@media (max-height:1000px){
+  .screen{padding:12px}
+  .panel{padding:16px 22px 20px;border-radius:14px}
+  .brand{gap:12px;margin-bottom:12px}
+  .logo{font-size:38px}
+  h1{font-size:30px}
+  .login{margin-bottom:12px}
+  #nick{padding:10px 13px;font-size:15px}
+  button{padding:10px 16px}
+  .msg{min-height:0}
+  .cols{gap:20px}
+  h3{margin-bottom:6px}
+  h3.mt{margin-top:14px}
+  ul.keys{font-size:13px;line-height:1.62;margin-bottom:10px}
+  .rules p{margin-bottom:6px;font-size:12.5px;line-height:1.45}
+}
+/* Восемь абзацев правил подряд — половина высоты панели. Экран при
+   этом широкий: раскладываем их в две колонки, и панель садится почти
+   в окно. Только на широких: в одну колонку строка станет нечитаемо
+   короткой. */
+@media (min-width:1000px) and (max-height:1000px){
+  .rules{columns:2;column-gap:24px}
+  .rules p{break-inside:avoid;margin-bottom:8px}
+}
+
+/* Экран итогов на низком окне: после забега кнопка «ещё один день»
+   уезжала под сгиб, и чтобы начать заново, приходилось мотать. Режем
+   плитки со счётом и доску — читать её всё равно прокруткой. */
+@media (max-height:1000px){
+  #end-body .grid{gap:7px;margin-bottom:10px}
+  #end-body .grid div{padding:8px 10px}
+  #end-body .grid b{font-size:16px}
+  .board{max-height:210px}
+  h2{font-size:24px}
+}
+@media (max-height:800px) and (min-width:900px){
+  #end-body .grid{grid-template-columns:repeat(8,1fr);gap:5px}
+  #end-body .grid b{font-size:14px}
+  #end-body .grid span{font-size:9px;letter-spacing:.04em}
+  .board{max-height:150px}
+}
+
+@media (max-height:800px){
+  .panel{padding:12px 18px 16px}
+  .brand{margin-bottom:9px}
+  .logo{font-size:30px}
+  h1{font-size:25px}
+  .sub{font-size:11px;letter-spacing:.18em}
+  .login{margin-bottom:9px}
+  .cols{gap:16px}
+  ul.keys{font-size:12.5px;line-height:1.5}
+  .rules p{font-size:12px;line-height:1.38;margin-bottom:5px}
+}

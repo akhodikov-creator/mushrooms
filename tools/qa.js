@@ -299,6 +299,36 @@ window.__qa2 = async function (дней = 24) {
     отчёт['приход'] = { до: доПрихода, вПриходе, после: чисто(), остаток: +g.tripT.toFixed(2) };
   }
 
+  /* --- вёрстка: до всего кликабельного должно быть можно домотать --- */
+  {
+    // Ловушка флексбокса: при центрировании через align-items то, что не
+    // влезло сверху, уходит ЗА начало прокрутки. На низком окне кнопка
+    // «В ЛЕС» так стала недосягаемой, и игру нельзя было запустить.
+    // Проверка идёт при том размере окна, в каком запущен стенд.
+    const беды = [];
+    for (const id of ['screen-start', 'screen-end', 'screen-pause']) {
+      const s = document.getElementById(id);
+      if (!s) { беды.push(id + ': нет в разметке'); continue; }
+      const былоСкрыто = s.hidden;
+      s.hidden = false;                       // проверяем вёрстку, а не текущий экран
+      const предел = s.scrollHeight;
+      for (const el of s.querySelectorAll('button, input, select')) {
+        const r = el.getBoundingClientRect();
+        const верх = r.top + s.scrollTop;     // в координатах прокрутки экрана
+        const низ = r.bottom + s.scrollTop;
+        if (верх < -1 || низ > предел + 1) {
+          беды.push(id + ' / ' + (el.id || el.tagName.toLowerCase()) +
+                    ': не домотать (верх ' + Math.round(верх) + ', предел ' + предел + ')');
+        }
+      }
+      s.hidden = былоСкрыто;
+    }
+    отчёт['вёрстка'] = { окно: innerWidth + '×' + innerHeight,
+                         недостижимых: беды.length, что: беды.slice(0, 6) };
+    for (const б of беды) беда('вёрстка', б);
+  }
+
+
   отчёт['ошибки'] = ОШИБКИ.map((e) => e.ключ);
   отчёт['итог'] = ОШИБКИ.length ? ('НАЙДЕНО: ' + ОШИБКИ.length) : 'чисто';
   return отчёт;
