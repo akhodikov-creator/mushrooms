@@ -1,0 +1,11 @@
+.DS_Store
+Thumbs.db
+*.log
+.vscode/
+
+# исходники скачанных моделей и черновики инструментов — в игру не идут
+tools/src/
+tools/out/
+# служебное
+.claude/
+__pycache__/

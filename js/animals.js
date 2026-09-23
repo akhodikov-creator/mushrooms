@@ -206,7 +206,7 @@ function buildKopatych() {
   return { g, head, legs: [], bodyMesh: g.children[0] };
 }
 
-/** Кабан: покупная модель с текстурой, запаска — прежний из шаров. */
+/** Кабан: модель со скелетом и клипами, запаска — прежний из шаров. */
 function buildBoarModel() {
   const model = instance('boar');
   if (!model) return buildBoar();
@@ -216,10 +216,13 @@ function buildBoarModel() {
     if (!o.isMesh) return;
     o.castShadow = true;
     o.material = tex;
+    // скиннутый меш выходит из позы покоя — пусть рисуется всегда
+    // (та же история, что у Копатыча)
+    o.frustumCulled = false;
   });
   g.add(model);
   const head = new THREE.Group();
-  head.position.set(0, 0.8, -0.72);
+  head.position.set(0, 0.85, -0.68);   // по ней считаются точные попадания
   g.add(head);
   return { g, head, legs: [], bodyMesh: g.children[0] };
 }
@@ -502,6 +505,19 @@ export const KINDS = {
     recover: 1.1, radius: 0.7, maxCharges: 5, instakill: false, damage: 58,
     lockDist: 9.0, chargeTurn: 2.4, engageRange: 14, sound: 'boar', headY: 0.8, bonus: CONFIG.killBonusBoar,
     corrida: true, aggroMusic: 0.7,
+    // Клипы родные, из той же модели. Подход — галопом (5,4 м/с как раз
+    // родная скорость бега), замах — роет землю, таран — во весь опор,
+    // после — рысцой. Темп подогнан под шаг копыта, замеренный по клипу:
+    // бег ~5,5 м/с, рысь ~2,8, шаг ~1,1. На таране (14 м/с) темп упёрт
+    // в 1,7 — быстрее ноги мельтешат, а на такой скорости скольжения не
+    // видно.
+    clips: 'boar',
+    clipMap: {
+      spawn: ['trot', 0.8], approach: ['run', 1.0], telegraph: ['dig', 1.3],
+      charge: ['run', 1.7], recover: ['trot', 1.0], leave: ['run', 1.45],
+      dead: ['death', 1.0],
+    },
+    clipOnce: ['death'],
   },
   wolf: {
     name: 'ВОЛК', build: buildWolf, hp: 90, scale: 1.0,
@@ -650,6 +666,93 @@ export function animalWarmupModels() {
   return Object.keys(KINDS).map((id) => modelOf(id).g);
 }
 
+/* ============================================================
+   Походка хозяина — из его же клипов.
+
+   Клипы пришли с Mixamo с «корневым движением»: кость бёдер сама
+   уезжает вперёд — в беге на 4,4 метра за полсекунды, — а на стыке
+   цикла прыгает обратно. Хозяина при этом двигает ещё и код, и он
+   шёл рывками: два отскока назад в секунду на бегу, один раз в
+   четыре секунды на шаге.
+
+   Здесь бёдра ставятся на место (горизонтальный снос вычитается,
+   покачивание остаётся), а из сноса берётся то, что в нём полезно:
+   родная скорость шага и бега — под неё подгоняется темп клипа, чтобы
+   ноги не скользили по траве, — и профиль прыжка: когда туша
+   отрывается, сколько пролетает к каждому мгновению и когда касается
+   земли. Код ведёт полёт ровно по этому профилю.
+
+   Клипы общие у всех хозяев, поэтому правятся один раз.
+   ============================================================ */
+const GAITS = new WeakMap();
+
+function gaitOf(clips, unit) {
+  let gt = GAITS.get(clips);
+  if (gt) return gt;
+  gt = { walk: 0.46, sprint: 8.3, jump: null, landP: 0.42 };
+  for (const c of clips) {
+    const tr = c.tracks.find((t) => /Hips\.position$/.test(t.name));
+    if (!tr) continue;
+    const v = tr.values, ts = tr.times, n = ts.length;
+    const dur = c.duration || ts[n - 1] || 1;
+    const x0 = v[0], z0 = v[2];
+    if (c.name === 'walk' || c.name === 'sprint') {
+      const dx = v[(n - 1) * 3] - x0, dz = v[(n - 1) * 3 + 2] - z0;
+      gt[c.name] = Math.max(0.1, Math.hypot(dx, dz) * unit / dur);
+      for (let i = 0; i < n; i++) {
+        const k = ts[i] / dur;
+        v[i * 3] -= dx * k;
+        v[i * 3 + 2] -= dz * k;
+      }
+    } else if (c.name === 'jump') {
+      // пик по высоте бёдер, приземление — когда они вернулись вниз
+      let peak = 0;
+      for (let i = 1; i < n; i++) if (v[i * 3 + 1] > v[peak * 3 + 1]) peak = i;
+      const base = v[1], top = v[peak * 3 + 1];
+      let land = n - 1;
+      for (let i = peak; i < n; i++) {
+        if (v[i * 3 + 1] <= base + (top - base) * 0.08) { land = i; break; }
+      }
+      const lx = v[land * 3] - x0, lz = v[land * 3 + 2] - z0;
+      const L = Math.hypot(lx, lz) || 1;
+      const times = new Float32Array(n), frac = new Float32Array(n);
+      let prev = 0;
+      for (let i = 0; i < n; i++) {
+        times[i] = ts[i] / dur;
+        const f = i >= land ? 1 : ((v[i * 3] - x0) * lx + (v[i * 3 + 2] - z0) * lz) / (L * L);
+        prev = Math.max(prev, Math.min(1, Math.max(0, f)));   // назад не летит
+        frac[i] = prev;
+      }
+      gt.jump = { times, frac };
+      gt.landP = times[land];
+      for (let i = 0; i < n; i++) { v[i * 3] = x0; v[i * 3 + 2] = z0; }
+    }
+  }
+  GAITS.set(clips, gt);
+  return gt;
+}
+
+/** Какую долю прыжка туша пролетела к моменту p (0..1 клипа). */
+function jumpFrac(gt, p) {
+  if (!gt.jump) return Math.min(1, Math.max(0, (p - 0.12) / (gt.landP - 0.12)));
+  const { times, frac } = gt.jump;
+  if (p <= times[0]) return frac[0];
+  for (let i = 1; i < times.length; i++) {
+    if (p <= times[i]) {
+      const k = (p - times[i - 1]) / Math.max(1e-6, times[i] - times[i - 1]);
+      return frac[i - 1] + (frac[i] - frac[i - 1]) * k;
+    }
+  }
+  return 1;
+}
+
+/** Повернуть угол a к b не быстрее step радиан. */
+function turnToward(a, b, step) {
+  let d = ((b - a) % TAU + TAU * 1.5) % TAU - Math.PI;
+  if (d > step) d = step; else if (d < -step) d = -step;
+  return a + d;
+}
+
 /* Хозяин бора. Не зверь: не разгоняется, не уклоняется, не убивает —
    отбирает собранное. Живёт по своему автомату, см. _updateBoss. */
 KINDS.shroom = {
@@ -715,6 +818,17 @@ class Animal {
           a.enabled = true;
           this.act[c.name] = a;
         }
+        if (this.k.boss) {
+          // масштаб бёдер в метрах: сколько метров мира в единице клипа
+          let hips = null;
+          m.g.traverse((o) => { if (!hips && o.isBone && /Hips$/.test(o.name)) hips = o; });
+          let unit = 1;
+          if (hips && hips.parent) {
+            m.g.updateMatrixWorld(true);
+            unit = hips.parent.getWorldScale(new THREE.Vector3()).x;
+          }
+          this.gait = gaitOf(clips, unit);
+        }
         const once = this.k.clipOnce || ['jump', 'steal'];
         for (const nm of once) {
           if (this.act[nm]) {
@@ -747,6 +861,15 @@ class Animal {
   dispose() {
     // геометрия общая с прототипом — выбрасывать её нельзя
     this.mgr.root.remove(this.g);
+    // А вот скелет у клона свой, и позы его костей лежат в видеопамяти
+    // отдельной текстурой. Без освобождения каждый ушедший зверь
+    // оставлял её там навсегда: за игровой день набегало два десятка.
+    const skels = new Set();
+    this.g.traverse((o) => { if (o.isSkinnedMesh && o.skeleton) skels.add(o.skeleton); });
+    for (const s of skels) s.dispose();
+    if (this.mixer) { this.mixer.stopAllAction(); this.mixer.uncacheRoot(this.g); }
+    // копия материала зрачков — своя у каждого медведя (см. конструктор)
+    if (this.rage) this.rage.dispose();
   }
 
   damage(amount, headshot, weapon) {
@@ -823,8 +946,8 @@ class Animal {
    * Зверь — это коррида: разгон по прямой и рывок в последний момент.
    * Хозяин устроен иначе: выходит из земли, идёт вразвалку, с дальней
    * дистанции переходит на бег, а вблизи прыгает и бьёт по площади.
-   * Попал — отнимает здоровье и лезет в тару; промахнулся — стоит
-   * отдыхает, и это единственное окно, чтобы всадить в него пулю.
+   * Попал — отнимает здоровье и лезет в тару; промахнулся — бредёт,
+   * переводя дух, и это единственное окно, чтобы всадить в него пулю.
    */
   _updateBoss(dt, player, mgr) {
     this.animT += dt;
@@ -838,24 +961,23 @@ class Animal {
     const dist = Math.hypot(dx, dz);
     const k = this.k;
     const grow = 1 + (this.meals || 0) * 0.07;
-    let step = 0;
-
-    // в прыжке он летит по заранее взятой линии, иначе смотрит на игрока
-    if (this.state !== 'jump') this.dir = Math.atan2(-dx, -dz);
+    const gt = this.gait || { walk: 0.46, sprint: 8.3, jump: null, landP: 0.62 };
+    this.speed = this.speed || 0;
+    let want = 0;            // к какой скорости стремится
+    let turn = 2.4;          // рад/с: трёхметровая туша на месте не крутится
 
     switch (this.state) {
       case 'spawn': {
         const t = Math.min(1, this.t / 2.2);
         this.rise = t;
         if (!this.greeted) { this.greeted = true; Audio.shroom(); }
-        this._play('walk', 0.01);
+        turn = 1.2;
         if (t >= 1) { this.state = 'walk'; this.t = 0; }
         break;
       }
 
       case 'walk': {
-        this._play('walk', 0.3);
-        step = k.walkSpeed * (1 + (this.meals || 0) * 0.05);
+        want = k.walkSpeed * (1 + (this.meals || 0) * 0.05);
         // вплотную прыгать незачем — просто лезет в тару
         if (dist < 2.4) { this.state = 'steal'; this.t = 0; this.took = false; }
         else if (dist < k.jumpFrom) { this.state = 'jump'; this.t = 0; this._startJump(dx, dz, dist); }
@@ -865,8 +987,8 @@ class Animal {
       }
 
       case 'sprint': {
-        this._play('sprint', 0.22);
-        step = k.sprintSpeed;
+        want = k.sprintSpeed;
+        turn = 1.7;
         if (dist < k.jumpFrom) { this.state = 'jump'; this.t = 0; this._startJump(dx, dz, dist); }
         else if (dist > k.sprintFrom * 2.2 || this.age > k.life) { this.state = 'walk'; this.t = 0; }
         break;
@@ -874,14 +996,20 @@ class Animal {
 
       case 'jump': {
         this._play('jump', 0.12, 1.35);
-        const d = (this.act && this.act.jump) ? this.act.jump.getClip().duration / 1.35 : 2.8;
-        const p = this.t / d;
-        // разгон и полёт занимают середину клипа, приземление на 62%
-        if (p > 0.18 && p < 0.62) step = this.jumpSpeed;
-        if (p >= 0.62 && !this.landed) {
+        // Время берём у самого клипа, а не своё: полёт и картинка идут
+        // по одним часам, и туша не опережает собственные ноги.
+        const a = this.act && this.act.jump;
+        const p = a ? Math.min(1, a.time / a.getClip().duration) : Math.min(1, this.t / 2.8);
+        const f = jumpFrac(gt, p);
+        this.x = wrapCoord(this.jx + this.jux * this.jumpDist * f);
+        this.z = wrapCoord(this.jz + this.juz * this.jumpDist * f);
+        this.speed = 0;
+        // удар — в тот миг, когда ноги касаются земли в клипе
+        if (p >= gt.landP && !this.landed) {
           this.landed = true;
           this.jumpY = 0;
-          const hit = dist < k.jumpRadius;
+          const ddx = wrapDelta(player.x - this.x), ddz = wrapDelta(player.z - this.z);
+          const hit = Math.hypot(ddx, ddz) < k.jumpRadius;
           mgr.onBossSlam?.(this, hit);
           if (hit) { this.state = 'steal'; this.t = 0; this.took = false; break; }
         }
@@ -890,7 +1018,8 @@ class Animal {
       }
 
       case 'steal': {
-        this._play('steal', 0.15);
+        this._play('steal', 0.2);
+        turn = 4;
         const d = (this.act && this.act.steal) ? this.act.steal.getClip().duration : 2.6;
         if (this.t > d * 0.42 && !this.took) {
           this.took = true;
@@ -902,7 +1031,9 @@ class Animal {
       }
 
       case 'recover': {
-        this._play('walk', 0.3, 0.35);          // топчется, переводит дух
+        // переводит дух: бредёт медленно, еле поворачиваясь, — окно для выстрела
+        want = 0.8;
+        turn = 1.0;
         if (this.t > 2.2) {
           this.state = this.age > k.life ? 'sink' : 'walk';
           this.t = 0;
@@ -929,9 +1060,33 @@ class Animal {
       }
     }
 
-    if (step > 0 && dist > 0.001) {
-      this.x = wrapCoord(this.x + (dx / dist) * step * dt);
-      this.z = wrapCoord(this.z + (dz / dist) * step * dt);
+    // В прыжке он летит по взятой при отрыве линии, иначе доворачивает
+    // к игроку — плавно: раньше разворот был мгновенным, и после уворота
+    // туша поворачивалась кругом за один кадр.
+    if (this.state !== 'jump' && this.state !== 'dead' && dist > 0.001) {
+      this.dir = turnToward(this.dir, Math.atan2(-dx, -dz), turn * dt);
+    }
+
+    // Скорость меняется плавно: разгон тяжёлый, торможение резче.
+    if (this.state !== 'jump') {
+      // в тару лезет с ходу — там тормозит почти сразу, без проезда
+      const acc = want > this.speed ? 3.5 : (this.state === 'steal' ? 14 : 8);
+      this.speed += clamp(want - this.speed, -acc * dt, acc * dt);
+      if (this.speed > 0.001) {
+        this.x = wrapCoord(this.x - Math.sin(this.dir) * this.speed * dt);
+        this.z = wrapCoord(this.z - Math.cos(this.dir) * this.speed * dt);
+      }
+    }
+
+    // Походка по скорости: медленно — шаг, быстрее — тяжёлый бег, и
+    // темп клипа подогнан под скорость, чтобы ноги не ехали по траве.
+    // Порог с запасом в обе стороны, иначе на границе клипы мигали бы.
+    if (this.state === 'spawn' || this.state === 'walk' || this.state === 'sprint'
+      || this.state === 'recover' || this.state === 'sink') {
+      const v = this.speed;
+      const run = this.clip === 'sprint' ? v > 1.5 : v > 2.1;
+      if (run) this._play('sprint', 0.4, clamp(v / (gt.sprint * grow), 0.42, 1.3));
+      else this._play('walk', 0.4, clamp(Math.max(v, 0.3) / (gt.walk * grow), 0.5, 3.2));
     }
 
     this.y = terrainHeight(this.x, this.z);
@@ -947,11 +1102,15 @@ class Animal {
     return dist;
   }
 
-  /** Замах перед прыжком: цель берётся один раз, дальше он летит по ней. */
+  /**
+   * Замах перед прыжком: цель берётся один раз, дальше он летит по ней —
+   * туда, где игрок стоял в момент отрыва. Кто успел отскочить, тот цел.
+   */
   _startJump(dx, dz, dist) {
     this.landed = false;
-    // долетает ровно туда, где игрок стоял в момент отрыва
-    this.jumpSpeed = Math.max(6, Math.min(15, dist / 0.9));
+    this.jx = this.x; this.jz = this.z;
+    this.jux = dx / (dist || 1); this.juz = dz / (dist || 1);
+    this.jumpDist = clamp(dist - 0.8, 1.5, 9);
     this.dir = Math.atan2(-dx, -dz);
   }
 

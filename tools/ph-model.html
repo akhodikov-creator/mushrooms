@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><base href="../"><title>poly haven model</title>
+<style>html,body{margin:0;background:#15181d;color:#9fb;font:12px/1.5 monospace}
+#log{padding:6px 8px;white-space:pre-wrap}canvas{display:block}</style>
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.168.0/build/three.module.js",
+"three/addons/":"https://cdn.jsdelivr.net/npm/three@0.168.0/examples/jsm/"}}
+</script></head><body>
+<div id="log">гружу…</div><canvas id="c"></canvas>
+<script type="module">
+/* Фотоскан с Poly Haven -> лёгкая модель для игры.
+
+   Сканы там снимались для рендера: пень — сорок тысяч треугольников,
+   коряга — сто. В игре их по нескольку на чанк, и столько нам не нужно:
+   упрощаем meshoptimizer'ом до пары тысяч. Он умеет не рвать швы
+   развёртки — вершины на стыке островов остаются на местах, и текстура
+   не расползается.
+
+   Текстуры в .glb не зашиваем (экспортёр перекодирует их в png и файл
+   распухает), кладём рядом webp: <имя>_col.webp и <имя>_nrm.webp.
+
+   Открывать с порта tools/serve.py — результат уходит запросом PUT.
+
+   ?id=tree_stump_01   ассет
+   ?tris=1600          сколько треугольников оставить (0 — не упрощать)
+   ?tex=512            сторона текстур
+   ?split=1            каждый меш — отдельный вариант (для наборов камней)
+   ?keep=0             оставить только этот меш (в скане пара сапог, нужен один)
+   ?out=assets/props
+*/
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+import { MeshoptSimplifier as S } from 'https://cdn.jsdelivr.net/npm/meshoptimizer@1.2.0/meshopt_simplifier.js';
+
+const q = new URLSearchParams(location.search);
+const ID = q.get('id');
+const TRIS = +(q.get('tris') ?? 1600);
+const TEX = +(q.get('tex') || 512);
+const SPLIT = q.get('split') === '1';
+const OUT = (q.get('out') || 'assets/props').replace(/\/$/, '');
+const log = (t) => { document.getElementById('log').textContent += '\n' + t; };
+
+/** Упрощение одного меша до нужного числа треугольников. */
+function simplify(geo, tris) {
+  const idx = new Uint32Array(geo.index.array);
+  const have = idx.length / 3;
+  if (!tris || tris >= have) return { geo, было: have, стало: have };
+  const pos = new Float32Array(geo.attributes.position.array);
+  const nrm = geo.attributes.normal ? new Float32Array(geo.attributes.normal.array) : null;
+  const target = Math.max(3, Math.floor(tris) * 3);
+  // ошибку не ограничиваем: мерило здесь число треугольников, а не точность
+  let res;
+  if (nrm) {
+    [res] = S.simplifyWithAttributes(idx, pos, 3, nrm, 3, [0.4, 0.4, 0.4], null, target, 1.0, []);
+  } else {
+    [res] = S.simplify(idx, pos, 3, target, 1.0, []);
+  }
+  // Если аккуратное упрощение упёрлось (у сканов бывают тысячи мелких
+  // островов развёртки, и швы держат сетку), дорезаем грубым способом.
+  if (res.length > target * 1.25) {
+    const [rough] = S.simplifySloppy(res, pos, 3, null, target, 1.0);
+    if (rough.length >= 3) res = rough;
+  }
+  // Выбрасываем вершины, на которые больше никто не ссылается
+  const map = new Int32Array(geo.attributes.position.count).fill(-1);
+  let n = 0;
+  for (let i = 0; i < res.length; i++) if (map[res[i]] < 0) map[res[i]] = n++;
+  const out = new THREE.BufferGeometry();
+  for (const name of ['position', 'normal', 'uv']) {
+    const a = geo.attributes[name];
+    if (!a) continue;
+    const arr = new Float32Array(n * a.itemSize);
+    for (let v = 0; v < map.length; v++) {
+      if (map[v] < 0) continue;
+      for (let k = 0; k < a.itemSize; k++) arr[map[v] * a.itemSize + k] = a.array[v * a.itemSize + k];
+    }
+    out.setAttribute(name, new THREE.BufferAttribute(arr, a.itemSize));
+  }
+  const ni = new Uint32Array(res.length);
+  for (let i = 0; i < res.length; i++) ni[i] = map[res[i]];
+  out.setIndex(new THREE.BufferAttribute(n > 65535 ? ni : new Uint16Array(ni), 1));
+  return { geo: out, было: have, стало: res.length / 3 };
+}
+
+/**
+ * Текстуру забираем сами, по ссылке из каталога, а не через загрузчик
+ * glTF: тот тянет картинки своим путём и на сканах Poly Haven молча
+ * отдавал материал без них — модель выходила белой.
+ */
+async function fileToWebp(url, size, alpha) {
+  if (!url) return null;
+  const bmp = await createImageBitmap(await (await fetch(url)).blob());
+  const c = new OffscreenCanvas(size, size);
+  const g = c.getContext('2d');
+  g.imageSmoothingQuality = 'high';
+  g.drawImage(bmp, 0, 0, size, size);
+  return c.convertToBlob({ type: 'image/webp', quality: alpha ? 0.9 : 0.82 });
+}
+
+async function put(path, blob) {
+  const r = await fetch('/' + path, { method: 'PUT', body: blob });
+  log(path + ': ' + r.status + ', ' + Math.round(blob.size / 1024) + ' КБ');
+  return blob.size;
+}
+
+(async () => {
+  if (!ID) { document.getElementById('log').textContent = 'задай ?id='; return; }
+  await S.ready;
+  const files = await (await fetch('https://api.polyhaven.com/files/' + ID)).json();
+  const url = files.gltf['1k'].gltf.url;
+  const gltf = await new GLTFLoader().loadAsync(url);
+  const root = gltf.scene;
+  root.updateWorldMatrix(true, true);
+
+  const meshes = [];
+  root.traverse((o) => { if (o.isMesh) meshes.push(o); });
+  log(ID + ': мешей ' + meshes.length);
+
+  // Материал берём у первого меша: у сканов он один на весь ассет
+  const mat = meshes[0].material;
+  const alpha = !!(mat.alphaTest > 0 || mat.transparent || mat.alphaMap);
+
+  // Геометрия в мировых координатах, без лишних атрибутов
+  const prep = (o) => {
+    let g = o.geometry.clone();
+    g.applyMatrix4(o.matrixWorld);
+    for (const k of Object.keys(g.attributes)) if (!['position', 'normal', 'uv'].includes(k)) g.deleteAttribute(k);
+    if (!g.index) {
+      const n = g.attributes.position.count, ix = new Uint32Array(n);
+      for (let i = 0; i < n; i++) ix[i] = i;
+      g.setIndex(new THREE.BufferAttribute(ix, 1));
+    }
+    return g;
+  };
+  let parts = meshes.map(prep);
+  if (q.get('keep') !== null) parts = [parts[+q.get('keep')]].filter(Boolean);
+  if (!SPLIT && parts.length > 1) {
+    const { mergeGeometries } = await import('three/addons/utils/BufferGeometryUtils.js');
+    parts = [mergeGeometries(parts, false)];
+  }
+
+  const group = new THREE.Group();
+  const per = SPLIT ? TRIS : TRIS;
+  let всегоБыло = 0, всегоСтало = 0;
+  parts.forEach((g, i) => {
+    const r = simplify(g, per);
+    всегоБыло += r.было; всегоСтало += r.стало;
+    // каждый вариант сажаем на землю и ставим по центру отдельно
+    r.geo.computeBoundingBox();
+    const b = r.geo.boundingBox;
+    r.geo.translate(-(b.min.x + b.max.x) / 2, -b.min.y, -(b.min.z + b.max.z) / 2);
+    r.geo.computeBoundingBox(); r.geo.computeBoundingSphere();
+    const m = new THREE.Mesh(r.geo, new THREE.MeshStandardMaterial({ name: ID }));
+    m.name = SPLIT ? ID + '_' + i : ID;
+    group.add(m);
+    const s = r.geo.boundingBox.getSize(new THREE.Vector3());
+    log('  ' + m.name + ': ' + Math.round(r.было) + ' → ' + Math.round(r.стало) + ' тр., ' +
+        [s.x, s.y, s.z].map((v) => v.toFixed(2)).join(' × ') + ' м');
+  });
+  log('итого ' + всегоБыло + ' → ' + всегоСтало + ' треугольников' + (alpha ? ', с прозрачностью' : ''));
+
+  const glb = await new Promise((ok, no) => new GLTFExporter().parse(group, ok, no, { binary: true }));
+  let кб = await put(OUT + '/' + ID + '.glb', new Blob([glb]));
+  const inc = files.gltf['1k'].gltf.include || {};
+  const pick = (re) => { const k = Object.keys(inc).find((n) => re.test(n)); return k ? inc[k].url : null; };
+  const col = await fileToWebp(pick(/_diff_/), TEX, alpha);
+  if (col) кб += await put(OUT + '/' + ID + '_col.webp', col);
+  const nrm = await fileToWebp(pick(/_nor_gl_/), TEX, false);
+  if (nrm) кб += await put(OUT + '/' + ID + '_nrm.webp', nrm);
+  if (!col) log('ВНИМАНИЕ: цветовой карты в каталоге нет');
+  log('в проект: ' + Math.round(кб / 1024) + ' КБ');
+
+  // предпросмотр с настоящими текстурами
+  const W = 840, H = 300;
+  const sc = new THREE.Scene(); sc.background = new THREE.Color(0x15181d);
+  sc.add(new THREE.HemisphereLight(0xffffff, 0x445566, 1.8));
+  const d = new THREE.DirectionalLight(0xffffff, 2.2); d.position.set(0.6, 1, 0.5); sc.add(d);
+  const tl = new THREE.TextureLoader();
+  const asTex = async (blob, srgb) => {
+    if (!blob) return null;
+    const t = await tl.loadAsync(URL.createObjectURL(blob));
+    t.flipY = false; if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+    return t;
+  };
+  const pm = new THREE.MeshStandardMaterial({
+    map: await asTex(col, true), normalMap: await asTex(nrm, false),
+    alphaTest: alpha ? 0.5 : 0, side: alpha ? THREE.DoubleSide : THREE.FrontSide, roughness: 0.9 });
+  const show = group.clone();
+  show.traverse((o) => { if (o.isMesh) o.material = pm; });
+  // варианты раскладываем в ряд, чтобы видеть каждый
+  let x = 0; show.children.forEach((c) => {
+    const s = c.geometry.boundingBox.getSize(new THREE.Vector3());
+    c.position.x = x + s.x / 2; x += s.x * 1.15;
+  });
+  const box = new THREE.Box3().setFromObject(show);
+  show.position.x -= (box.min.x + box.max.x) / 2;
+  sc.add(show);
+  const b2 = new THREE.Box3().setFromObject(show), c = b2.getCenter(new THREE.Vector3());
+  const R = Math.max(...b2.getSize(new THREE.Vector3()).toArray()) * 1.1;
+  const r = new THREE.WebGLRenderer({ canvas: document.getElementById('c'), antialias: true, preserveDrawingBuffer: true });
+  r.setPixelRatio(1); r.setSize(W, H); r.setScissorTest(true); r.outputColorSpace = THREE.SRGBColorSpace;
+  r.setViewport(0, 0, W, H); r.setScissor(0, 0, W, H); r.setClearColor(0x15181d, 1); r.clear();
+  const cam = new THREE.PerspectiveCamera(30, (W / 3) / H, R / 100, R * 10);
+  [[0, 0.25, 1], [1, 0.25, 0.1], [0.7, 0.8, 0.7]].forEach((v, i) => {
+    r.setViewport(i * W / 3, 0, W / 3, H); r.setScissor(i * W / 3 + 1, 1, W / 3 - 2, H - 2);
+    cam.position.set(c.x + v[0] * R * 2.2, c.y + v[1] * R * 2.2, c.z + v[2] * R * 2.2);
+    cam.lookAt(c); cam.updateProjectionMatrix(); r.render(sc, cam);
+  });
+  window.__done = { треугольников: всегоСтало, кб: Math.round(кб / 1024), вариантов: group.children.length };
+})().catch((e) => { log('ОШИБКА: ' + (e && e.stack || e)); window.__done = { ошибка: String(e) }; });
+</script></body></html>

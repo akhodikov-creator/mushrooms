@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><base href="../"><title>sf prep</title>
+<style>html,body{margin:0;background:#15181d;color:#9fb;font:12px/1.5 monospace}
+#log{padding:6px 8px;white-space:pre-wrap}canvas{display:block}</style>
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.168.0/build/three.module.js",
+"three/addons/":"https://cdn.jsdelivr.net/npm/three@0.168.0/examples/jsm/"}}
+</script></head><body>
+<div id="log">гружу…</div><canvas id="c"></canvas>
+<script type="module">
+/* Скачанная модель (glTF с Sketchfab) -> лёгкая модель для игры.
+
+   Что делает:
+   - упрощает сетку meshoptimizer'ом, в том числе у зверя со скелетом:
+     веса костей переезжают вместе с вершинами;
+   - текстуры ужимает и кладёт рядом в webp (в .glb не зашиваем —
+     экспортёр перекодирует их в png, и файл распухает);
+   - несколько материалов сводит в один атлас 2×2 (?atlas=1): одна
+     текстура, один вызов отрисовки;
+   - из анимаций оставляет только нужные и даёт им короткие имена.
+
+   Открывать с порта tools/serve.py — результат уходит запросом PUT.
+
+   ?src=tools/src/sf/…/scene.gltf
+   ?out=assets/имя           -> имя.glb, имя_col.webp, имя_nrm.webp
+   ?tris=3000                сколько треугольников оставить (0 — не трогать)
+   ?tex=512                  сторона текстур (у атласа — сторона всего атласа)
+   ?atlas=1                  свести материалы в один атлас
+   ?clips=Run_F_IP:run,…     какие клипы оставить и как назвать
+   ?reset=Имя_узла           обнулить положение узла (у сканов со Sketchfab
+                             модель бывает сдвинута и повёрнута сценой автора)
+   ?minIsland=20             выбросить отдельные кусочки сетки мельче стольких
+                             треугольников (карточки шерсти без текстуры —
+                             сплошные пластинки); глаза крупнее и остаются
+   ?upright=run              поставить зверя по его позе в этом клипе: от
+                             хвоста к носу — вперёд (+Z), копыта — на ноль
+   ?sloppy=0                 не дорезать грубым упрощением (у зверя оно
+                             тянет длинные треугольники через всё тело)
+   ?handle=1                 поднять ручку ведра: тонкий отдельный кусок сетки
+                             поворачивается вокруг оси через «ушки» вверх и
+                             уходит отдельным мешем handle (тело — body)
+   ?hand=L                   вырезать одну кисть (L или R) с кусочком предплечья
+                             и поставить её как прежнюю: запястье в точке
+                             ?wrist=x,y,z, пальцы в -Z, большой палец в сторону
+                             ?thumb=x,y (поперёк пальцев), длина до кончика
+                             среднего пальца ?len=0.175
+   ?bake=boar                нарисовать шкуру по положению точки на теле
+                             (у кабана текстуры в архиве не было)
+   ?dry=1                    только посмотреть, ничего не писать
+*/
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+import { MeshoptSimplifier as S } from 'https://cdn.jsdelivr.net/npm/meshoptimizer@1.2.0/meshopt_simplifier.js';
+
+const q = new URLSearchParams(location.search);
+const SRC = q.get('src');
+const OUT = (q.get('out') || 'tools/out/model').replace(/\.glb$/, '');
+const TRIS = +(q.get('tris') || 0);
+const TEX = +(q.get('tex') || 512);
+const ATLAS = q.get('atlas') === '1';
+const DRY = q.get('dry') === '1';
+const CLIPS = (q.get('clips') || '').split(',').filter(Boolean).map((s) => s.split(':'));
+const RESET = (q.get('reset') || '').split(',').filter(Boolean);
+const MIN_ISLAND = +(q.get('minIsland') || 0);
+const BAKE = q.get('bake');
+const UPRIGHT = q.get('upright');
+const SLOPPY = q.get('sloppy') !== '0';
+
+/** Номер кусочка сетки для каждого треугольника (сварка по положению). */
+function islandsOf(geo) {
+  const pos = geo.attributes.position, idx = geo.index.array, n = pos.count;
+  const km = new Map(), canon = new Int32Array(n);
+  for (let i = 0; i < n; i++) {
+    const k = Math.round(pos.getX(i) * 1e4) + ',' + Math.round(pos.getY(i) * 1e4) + ',' + Math.round(pos.getZ(i) * 1e4);
+    if (!km.has(k)) km.set(k, i);
+    canon[i] = km.get(k);
+  }
+  const par = new Int32Array(n).map((_, i) => i);
+  const f = (x) => { while (par[x] !== x) { par[x] = par[par[x]]; x = par[x]; } return x; };
+  const u = (x, y) => { x = f(x); y = f(y); if (x !== y) par[x] = y; };
+  for (let t = 0; t < idx.length; t += 3) { u(canon[idx[t]], canon[idx[t + 1]]); u(canon[idx[t]], canon[idx[t + 2]]); }
+  const tri = new Int32Array(idx.length / 3);
+  for (let t = 0; t < tri.length; t++) tri[t] = f(canon[idx[t * 3]]);
+  return tri;
+}
+
+/** Геометрия из части треугольников исходной. */
+function subGeometry(geo, keepTri) {
+  const idx = geo.index.array, out = [];
+  for (let t = 0; t < idx.length / 3; t++) if (keepTri(t)) out.push(idx[t * 3], idx[t * 3 + 1], idx[t * 3 + 2]);
+  const g = geo.clone();
+  g.setIndex(new THREE.BufferAttribute(new Uint32Array(out), 1));
+  return g;
+}
+
+/**
+ * Поднять ручку ведра. Дужка у скана висит вдоль бока; её концы
+ * (крайние по X точки) — ушки, ось поворота идёт через них. Крутим так,
+ * чтобы середина дужки встала ровно над осью.
+ */
+function raiseHandle(mesh) {
+  const geo = mesh.geometry;
+  const tri = islandsOf(geo);
+  const idx = geo.index.array, pos = geo.attributes.position;
+  const count = new Map(), box = new Map();
+  for (let t = 0; t < tri.length; t++) {
+    count.set(tri[t], (count.get(tri[t]) || 0) + 1);
+    let b = box.get(tri[t]);
+    if (!b) { b = new THREE.Box3(); box.set(tri[t], b); }
+    for (let k = 0; k < 3; k++) b.expandByPoint(new THREE.Vector3().fromBufferAttribute(pos, idx[t * 3 + k]));
+  }
+  const ids = [...count.keys()].sort((a, b) => count.get(b) - count.get(a));
+  const bodyId = ids[0];
+  const bodySize = box.get(bodyId).getSize(new THREE.Vector3());
+  // дужка — длинная (почти во всю ширину ведра) и тонкая
+  const handleIds = new Set(ids.slice(1).filter((id) => box.get(id).getSize(new THREE.Vector3()).x > bodySize.x * 0.6));
+  if (!handleIds.size) return null;
+  const hg = subGeometry(geo, (t) => handleIds.has(tri[t]));
+  const bg = subGeometry(geo, (t) => !handleIds.has(tri[t]));
+  // ось через крайние по X вершины дужки
+  const hp = hg.attributes.position, hi = hg.index.array;
+  let a = null, b = null;
+  const c = new THREE.Vector3(); let n = 0;
+  for (let i = 0; i < hi.length; i++) {
+    const v = new THREE.Vector3().fromBufferAttribute(hp, hi[i]);
+    if (!a || v.x < a.x) a = v.clone();
+    if (!b || v.x > b.x) b = v.clone();
+    c.add(v); n++;
+  }
+  c.divideScalar(n);
+  const axis = b.clone().sub(a).normalize();
+  const mid = a.clone().add(b).multiplyScalar(0.5);
+  // куда сейчас смотрит дужка от оси и куда надо (вверх, поперёк оси)
+  const d = c.clone().sub(mid); d.sub(axis.clone().multiplyScalar(d.dot(axis))).normalize();
+  // «верх» мира в координатах самой сетки: узлы сцены её поворачивают
+  mesh.updateWorldMatrix(true, false);
+  const up = new THREE.Vector3(0, 1, 0).transformDirection(mesh.matrixWorld.clone().invert());
+  up.sub(axis.clone().multiplyScalar(up.dot(axis))).normalize();
+  let ang = Math.acos(THREE.MathUtils.clamp(d.dot(up), -1, 1));
+  if (new THREE.Vector3().crossVectors(d, up).dot(axis) < 0) ang = -ang;
+  const m = new THREE.Matrix4().makeTranslation(-mid.x, -mid.y, -mid.z)
+    .premultiply(new THREE.Matrix4().makeRotationAxis(axis, ang))
+    .premultiply(new THREE.Matrix4().makeTranslation(mid.x, mid.y, mid.z));
+  hg.applyMatrix4(m);
+  const parent = mesh.parent;
+  const mb = new THREE.Mesh(bg, mesh.material); mb.name = 'body';
+  const mh = new THREE.Mesh(hg, mesh.material); mh.name = 'handle';
+  for (const o of [mb, mh]) { o.position.copy(mesh.position); o.quaternion.copy(mesh.quaternion); o.scale.copy(mesh.scale); parent.add(o); }
+  parent.remove(mesh);
+  return { mb, mh, ang };
+}
+
+/** Выбросить вершины, на которые не ссылается ни один треугольник. */
+function compact(geo) {
+  const idx = geo.index.array, n = geo.attributes.position.count;
+  const map = new Int32Array(n).fill(-1);
+  let k = 0;
+  for (let i = 0; i < idx.length; i++) if (map[idx[i]] < 0) map[idx[i]] = k++;
+  const out = new THREE.BufferGeometry();
+  for (const [name, a] of Object.entries(geo.attributes)) {
+    const arr = new a.array.constructor(k * a.itemSize);
+    for (let v = 0; v < n; v++) {
+      if (map[v] < 0) continue;
+      for (let c = 0; c < a.itemSize; c++) arr[map[v] * a.itemSize + c] = a.array[v * a.itemSize + c];
+    }
+    out.setAttribute(name, new THREE.BufferAttribute(arr, a.itemSize, a.normalized));
+  }
+  const ni = new Uint32Array(idx.length);
+  for (let i = 0; i < idx.length; i++) ni[i] = map[idx[i]];
+  out.setIndex(new THREE.BufferAttribute(ni, 1));
+  return out;
+}
+
+/**
+ * Одна кисть из пары рук. Оставляем треугольники, у которых главная
+ * кость — кисть, пальцы или нижняя часть предплечья нужной стороны;
+ * плечи, локти и вторая рука уходят.
+ */
+function cutHand(meshes, side) {
+  const skel = meshes[0].skeleton;
+  const handBone = skel.bones.find((b) => new RegExp('^hand' + side + '(_[0-9]+)?$').test(b.name));
+  if (!handBone) return null;
+  const keep = new Set();
+  handBone.traverse((b) => { if (b.isBone) keep.add(skel.bones.indexOf(b)); });
+  if (handBone.parent && handBone.parent.isBone) keep.add(skel.bones.indexOf(handBone.parent));
+  for (const m of meshes) {
+    const g = m.geometry, si = g.attributes.skinIndex, sw = g.attributes.skinWeight, idx = g.index.array;
+    const main = (v) => {
+      let best = 0, bw = -1;
+      for (let c = 0; c < 4; c++) { const w = sw.getComponent(v, c); if (w > bw) { bw = w; best = si.getComponent(v, c); } }
+      return best;
+    };
+    const out = [];
+    for (let t = 0; t < idx.length; t += 3) {
+      if (keep.has(main(idx[t])) && keep.has(main(idx[t + 1])) && keep.has(main(idx[t + 2]))) out.push(idx[t], idx[t + 1], idx[t + 2]);
+    }
+    g.setIndex(new THREE.BufferAttribute(new Uint32Array(out), 1));
+    m.geometry = compact(g);
+  }
+  return handBone;
+}
+
+/** Выбросить мелкие отдельные кусочки сетки (сварка по положению). */
+function dropIslands(geo, minTris) {
+  const pos = geo.attributes.position, idx = geo.index.array, n = pos.count;
+  const km = new Map(), canon = new Int32Array(n);
+  for (let i = 0; i < n; i++) {
+    const k = Math.round(pos.getX(i) * 1e4) + ',' + Math.round(pos.getY(i) * 1e4) + ',' + Math.round(pos.getZ(i) * 1e4);
+    if (!km.has(k)) km.set(k, i);
+    canon[i] = km.get(k);
+  }
+  const par = new Int32Array(n).map((_, i) => i);
+  const f = (x) => { while (par[x] !== x) { par[x] = par[par[x]]; x = par[x]; } return x; };
+  const u = (x, y) => { x = f(x); y = f(y); if (x !== y) par[x] = y; };
+  for (let t = 0; t < idx.length; t += 3) {
+    u(canon[idx[t]], canon[idx[t + 1]]);
+    u(canon[idx[t]], canon[idx[t + 2]]);
+  }
+  const cnt = new Map();
+  for (let t = 0; t < idx.length; t += 3) { const r = f(canon[idx[t]]); cnt.set(r, (cnt.get(r) || 0) + 1); }
+  const keep = [];
+  let dropped = 0;
+  for (let t = 0; t < idx.length; t += 3) {
+    if (cnt.get(f(canon[idx[t]])) < minTris) { dropped++; continue; }
+    keep.push(idx[t], idx[t + 1], idx[t + 2]);
+  }
+  geo.setIndex(new THREE.BufferAttribute(new Uint32Array(keep), 1));
+  return dropped;
+}
+
+/**
+ * Шкура кабана, нарисованная по телу.
+ *
+ * Сетка раскладывается по своей развёртке (вершина встаёт в точку uv),
+ * а цвет каждой точки считается по её месту на теле в позе покоя:
+ * бурая с проседью щетина, тёмный хребет с гривой, чёрные ноги и
+ * копыта, голое рыло с пятаком, чёрные глаза. Координаты — модели
+ * «Wild Boar - Male»: морда в +Z, копыта на нуле, глаза на ±0,094.
+ */
+const BAKE_FRAG = {
+  boar: `
+    varying vec3 vP; varying vec3 vN;
+    float h(vec3 p) { return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
+    float nz(vec3 p) {
+      vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+      return mix(mix(mix(h(i), h(i + vec3(1,0,0)), f.x), mix(h(i + vec3(0,1,0)), h(i + vec3(1,1,0)), f.x), f.y),
+                 mix(mix(h(i + vec3(0,0,1)), h(i + vec3(1,0,1)), f.x), mix(h(i + vec3(0,1,1)), h(i + vec3(1,1,1)), f.x), f.y), f.z);
+    }
+    float fbm(vec3 p) { return nz(p) * 0.5 + nz(p * 2.03) * 0.3 + nz(p * 4.1) * 0.2; }
+    void main() {
+      vec3 p = vP, n = normalize(vN);
+      float fb = fbm(p * 7.0);
+      // щетина вытянута вдоль тела: по длине шум редкий, поперёк частый
+      float hair = nz(vec3(p.x * 170.0, p.y * 170.0, p.z * 38.0));
+      float fine = nz(vec3(p.x * 300.0, p.y * 120.0, p.z * 300.0));
+      vec3 dark = vec3(0.17, 0.13, 0.095), mid = vec3(0.4, 0.31, 0.22), tip = vec3(0.66, 0.57, 0.45);
+      vec3 c = mix(dark, mid, smoothstep(0.28, 0.78, fb));
+      c = mix(c, tip, smoothstep(0.6, 0.92, hair) * 0.6);          // проседь на кончиках
+      c *= 0.78 + 0.34 * fine;
+      // хребет с гривой темнее
+      float ridge = smoothstep(0.13, 0.0, abs(p.x)) * smoothstep(0.68, 0.84, p.y)
+        * smoothstep(-0.45, -0.3, p.z) * smoothstep(0.66, 0.5, p.z);
+      c = mix(c, dark * (0.7 + 0.4 * hair), ridge * 0.7);
+      // брюхо чуть светлее
+      c *= 1.0 + 0.22 * smoothstep(-0.25, -0.8, n.y) * step(0.3, p.y);
+      // ноги чернеют книзу, копыта совсем тёмные
+      c = mix(c, vec3(0.085, 0.07, 0.06) * (0.75 + 0.5 * fine), smoothstep(0.46, 0.24, p.y) * 0.85);
+      c = mix(c, vec3(0.032, 0.028, 0.026), smoothstep(0.135, 0.085, p.y));
+      // рыло: шерсть редеет, кожа серо-бурая; пятак розоватый
+      float snout = smoothstep(0.83, 0.93, p.z);
+      c = mix(c, vec3(0.3, 0.235, 0.2) * (0.8 + 0.35 * fb), snout * 0.85);
+      float disc = smoothstep(0.952, 0.972, p.z) * smoothstep(0.2, 0.6, n.z);
+      c = mix(c, vec3(0.42, 0.29, 0.27) * (0.85 + 0.3 * fine), disc);
+      // глаза
+      float e = min(length(p - vec3(0.094, 0.901, 0.759)), length(p - vec3(-0.094, 0.901, 0.759)));
+      c = mix(vec3(0.02, 0.015, 0.012), c, smoothstep(0.018, 0.023, e));
+      gl_FragColor = vec4(c, 1.0);
+    }`,
+};
+
+async function bakeTexture(meshes, kind, size) {
+  const r = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
+  r.setPixelRatio(1); r.setSize(size, size);
+  r.outputColorSpace = THREE.LinearSRGBColorSpace;   // цвета пишем как есть
+  const rt = new THREE.WebGLRenderTarget(size, size);
+  const sc = new THREE.Scene();
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { off: { value: new THREE.Vector2() } },
+    vertexShader: `
+      uniform vec2 off; varying vec3 vP; varying vec3 vN;
+      void main() { vP = position; vN = normal;
+        gl_Position = vec4(uv.x * 2.0 - 1.0 + off.x, 1.0 - uv.y * 2.0 + off.y, 0.0, 1.0); }`,
+    fragmentShader: BAKE_FRAG[kind],
+    side: THREE.DoubleSide, depthTest: false, depthWrite: false,
+  });
+  for (const m of meshes) sc.add(new THREE.Mesh(m.geometry, mat));
+  const cam = new THREE.Camera();
+  r.setRenderTarget(rt);
+  r.setClearColor(0x2a221b, 1); r.clear();
+  r.autoClear = false;
+  // Растекаем край островов на пару пикселей: иначе на уменьшенных
+  // копиях текстуры по швам развёртки проступает фон.
+  const px = 2 / size;
+  for (const [ox, oy] of [[-2, 0], [2, 0], [0, -2], [0, 2], [-1.5, -1.5], [1.5, 1.5], [-1.5, 1.5], [1.5, -1.5], [0, 0]]) {
+    mat.uniforms.off.value.set(ox * px, oy * px);
+    r.render(sc, cam);
+  }
+  const buf = new Uint8Array(size * size * 4);
+  r.readRenderTargetPixels(rt, 0, 0, size, size, buf);
+  const c = new OffscreenCanvas(size, size), g = c.getContext('2d');
+  const img = g.createImageData(size, size);
+  for (let y = 0; y < size; y++) img.data.set(buf.subarray((size - 1 - y) * size * 4, (size - y) * size * 4), y * size * 4);
+  g.putImageData(img, 0, 0);
+  r.dispose();
+  return c;
+}
+const log = (t) => { document.getElementById('log').textContent += '\n' + t; };
+
+/** Упрощение: все атрибуты вершин (и кости с весами) едут вместе. */
+function simplify(geo, tris) {
+  if (!geo.index) {
+    const n = geo.attributes.position.count, ix = new Uint32Array(n);
+    for (let i = 0; i < n; i++) ix[i] = i;
+    geo.setIndex(new THREE.BufferAttribute(ix, 1));
+  }
+  const idx = new Uint32Array(geo.index.array);
+  const have = idx.length / 3;
+  if (!tris || tris >= have) return { geo, было: have, стало: have };
+  const pos = new Float32Array(geo.attributes.position.array);
+  const target = Math.max(3, Math.floor(tris) * 3);
+  const nrm = geo.attributes.normal ? new Float32Array(geo.attributes.normal.array) : null;
+  let [res] = nrm
+    ? S.simplifyWithAttributes(idx, pos, 3, nrm, 3, [0.4, 0.4, 0.4], null, target, 1.0, [])
+    : S.simplify(idx, pos, 3, target, 1.0, []);
+  if (SLOPPY && res.length > target * 1.25) {
+    const [rough] = S.simplifySloppy(res, pos, 3, null, target, 1.0);
+    if (rough.length >= 3) res = rough;
+  }
+  const map = new Int32Array(geo.attributes.position.count).fill(-1);
+  let n = 0;
+  for (let i = 0; i < res.length; i++) if (map[res[i]] < 0) map[res[i]] = n++;
+  const out = new THREE.BufferGeometry();
+  for (const [name, a] of Object.entries(geo.attributes)) {
+    const arr = new a.array.constructor(n * a.itemSize);
+    for (let v = 0; v < map.length; v++) {
+      if (map[v] < 0) continue;
+      for (let k = 0; k < a.itemSize; k++) arr[map[v] * a.itemSize + k] = a.array[v * a.itemSize + k];
+    }
+    out.setAttribute(name, new THREE.BufferAttribute(arr, a.itemSize, a.normalized));
+  }
+  const ni = new Uint32Array(res.length);
+  for (let i = 0; i < res.length; i++) ni[i] = map[res[i]];
+  out.setIndex(new THREE.BufferAttribute(n > 65535 ? ni : new Uint16Array(ni), 1));
+  return { geo: out, было: have, стало: res.length / 3 };
+}
+
+function toCanvas(img, size) {
+  const c = new OffscreenCanvas(size, size);
+  const g = c.getContext('2d');
+  g.imageSmoothingQuality = 'high';
+  if (img) g.drawImage(img, 0, 0, size, size);
+  return c;
+}
+const webp = (c, qv = 0.84) => c.convertToBlob({ type: 'image/webp', quality: qv });
+
+async function put(path, blob) {
+  if (DRY) { log('(сухой прогон) ' + path + ': ' + Math.round(blob.size / 1024) + ' КБ'); return blob.size; }
+  const r = await fetch('/' + path, { method: 'PUT', body: blob });
+  log(path + ': ' + r.status + ', ' + Math.round(blob.size / 1024) + ' КБ');
+  return blob.size;
+}
+
+(async () => {
+  await S.ready;
+  const gltf = await new GLTFLoader().loadAsync(SRC);
+  const root = gltf.scene;
+  for (const name of RESET) {
+    const o = root.getObjectByName(name);
+    if (!o) { log('узла ' + name + ' нет'); continue; }
+    o.position.set(0, 0, 0); o.rotation.set(0, 0, 0); o.scale.set(1, 1, 1);
+    log('узел ' + name + ' обнулён');
+  }
+  root.updateMatrixWorld(true);
+  const meshes = [];
+  root.traverse((o) => { if (o.isMesh) meshes.push(o); });
+  if (q.get('hand')) {
+    const side = q.get('hand');
+    const hb = cutHand(meshes.filter((m) => m.isSkinnedMesh), side);
+    if (!hb) log('кости hand' + side + ' нет');
+    else {
+      root.updateMatrixWorld(true);
+      const bone = (re) => { let b = null; root.traverse((o) => { if (!b && o.isBone && re.test(o.name)) b = o; }); return b; };
+      const wp = (b) => b.getWorldPosition(new THREE.Vector3());
+      const wrist = wp(hb);
+      const tip = wp(bone(new RegExp('^f_middle03' + side + '_end')));
+      const thumb = wp(bone(new RegExp('^thumb03' + side + '_end')));
+      const fwd = tip.clone().sub(wrist);
+      const L = fwd.length(); fwd.normalize();
+      const th = thumb.clone().sub(wrist); th.sub(fwd.clone().multiplyScalar(th.dot(fwd))).normalize();
+      // целевые оси: пальцы в -Z, большой палец поперёк — куда скажут
+      const tw = (q.get('wrist') || '-0.004,-0.011,0.082').split(',').map(Number);
+      const tt = (q.get('thumb') || '-0.864,0.503').split(',').map(Number);
+      const LEN = +(q.get('len') || 0.175);
+      const F = new THREE.Vector3(0, 0, -1), Th = new THREE.Vector3(tt[0], tt[1], 0).normalize();
+      // базис источника и цели: (палец, большой, их векторное)
+      const bs = new THREE.Matrix4().makeBasis(fwd, th, new THREE.Vector3().crossVectors(fwd, th));
+      const bt = new THREE.Matrix4().makeBasis(F, Th, new THREE.Vector3().crossVectors(F, Th));
+      const R = bt.clone().multiply(bs.clone().transpose());
+      const k = LEN / L;
+      const M = new THREE.Matrix4().makeTranslation(tw[0], tw[1], tw[2])
+        .multiply(new THREE.Matrix4().makeScale(k, k, k)).multiply(R)
+        .multiply(new THREE.Matrix4().makeTranslation(-wrist.x, -wrist.y, -wrist.z));
+      const W = new THREE.Group(); W.name = 'hand' + side;
+      for (const ch of [...root.children]) W.add(ch);
+      root.add(W);
+      M.decompose(W.position, W.quaternion, W.scale);
+      root.updateMatrixWorld(true);
+      log('кисть ' + side + ': длина ' + L.toFixed(2) + ' ед. → ' + LEN + ' м');
+    }
+  }
+  if (q.get('handle') === '1') {
+    const r = raiseHandle(meshes[0]);
+    if (r) { meshes.splice(0, 1, r.mb, r.mh); log('ручка поднята, поворот ' + (r.ang * 180 / Math.PI).toFixed(0) + '°'); }
+    else log('ручка не найдена');
+  }
+  if (MIN_ISLAND) {
+    for (const m of meshes) {
+      if (!m.geometry.index) continue;
+      log('мелких кусочков выброшено: ' + dropIslands(m.geometry, MIN_ISLAND) + ' тр.');
+    }
+  }
+  const skinned = meshes.some((m) => m.isSkinnedMesh);
+  log(SRC + '\nмешей ' + meshes.length + (skinned ? ', со скелетом' : '') + ', клипов ' + gltf.animations.length);
+
+  // упрощение: бюджет делим по мешам пропорционально их весу
+  const total = meshes.reduce((s, m) => s + (m.geometry.index ? m.geometry.index.count : m.geometry.attributes.position.count) / 3, 0);
+  let было = 0, стало = 0;
+  for (const m of meshes) {
+    const have = (m.geometry.index ? m.geometry.index.count : m.geometry.attributes.position.count) / 3;
+    const r = simplify(m.geometry, TRIS ? Math.round(TRIS * have / total) : 0);
+    // лишнее из сканов: касательные и запасные развёртки
+    for (const k of Object.keys(r.geo.attributes)) {
+      if (!['position', 'normal', 'uv', 'skinIndex', 'skinWeight'].includes(k)) r.geo.deleteAttribute(k);
+    }
+    m.geometry = r.geo;
+    было += r.было; стало += r.стало;
+  }
+  log('треугольников ' + Math.round(было) + ' → ' + Math.round(стало));
+
+  // текстуры
+  const mats = [...new Set(meshes.map((m) => m.material))];
+  let кб = 0;
+  let previewCol = null;
+  if (BAKE) {
+    previewCol = await bakeTexture(meshes, BAKE, TEX);
+    кб += await put(OUT + '_col.webp', await webp(previewCol, 0.88));
+  } else if (ATLAS && mats.length > 1) {
+    // атлас 2×2: развёртка каждого материала сжимается в свою четверть
+    const col = new OffscreenCanvas(TEX, TEX), cg = col.getContext('2d');
+    cg.imageSmoothingQuality = 'high';
+    const h = TEX / 2;
+    mats.forEach((mat, i) => {
+      const ix = i % 2, iy = (i / 2) | 0;
+      if (mat.map && mat.map.image) cg.drawImage(mat.map.image, ix * h, iy * h, h, h);
+      for (const m of meshes.filter((mm) => mm.material === mat)) {
+        const uv = m.geometry.attributes.uv;
+        for (let k = 0; k < uv.count; k++) {
+          // у glTF начало развёртки сверху, как у картинки: v идёт вниз
+          uv.setXY(k, (THREE.MathUtils.clamp(uv.getX(k), 0, 1) * (h - 4) + 2 + ix * h) / TEX,
+            (THREE.MathUtils.clamp(uv.getY(k), 0, 1) * (h - 4) + 2 + iy * h) / TEX);
+        }
+      }
+    });
+    previewCol = col;
+    кб += await put(OUT + '_col.webp', await webp(col));
+    const one = new THREE.MeshStandardMaterial({ name: 'atlas' });
+    for (const m of meshes) m.material = one;
+  } else {
+    const mat = mats[0];
+    if (mat.map && mat.map.image) {
+      previewCol = toCanvas(mat.map.image, TEX);
+      кб += await put(OUT + '_col.webp', await webp(previewCol));
+    }
+    if (mat.normalMap && mat.normalMap.image) кб += await put(OUT + '_nrm.webp', await webp(toCanvas(mat.normalMap.image, TEX), 0.9));
+    if (!mat.map) log('цветовой карты нет — цвет материала: #' + (mat.color ? mat.color.getHexString() : '—'));
+  }
+  // в .glb только геометрия: материалам оставляем имя и цвет
+  for (const m of meshes) {
+    const src = Array.isArray(m.material) ? m.material[0] : m.material;
+    m.material = new THREE.MeshStandardMaterial({ name: src.name, color: src.color ? src.color.clone() : 0xffffff });
+  }
+
+  // клипы
+  let clips = [];
+  if (CLIPS.length) {
+    for (const [from, to] of CLIPS) {
+      const c = gltf.animations.find((a) => a.name === from || a.name.endsWith('|' + from));
+      if (!c) { log('клипа ' + from + ' нет'); continue; }
+      const cc = c.clone();
+      cc.name = to || from;
+      // Дорожка масштаба нужна, только если он где-то не единица:
+      // постоянная единица ничего не меняет, а файл тяжелее.
+      if (q.get('keepScale') !== '1') {
+        cc.tracks = cc.tracks.filter((t) => !/\.scale$/.test(t.name) || t.values.some((v) => Math.abs(v - 1) > 1e-4));
+      }
+      clips.push(cc);
+      log('  клип ' + cc.name + ' ← ' + c.name + ', ' + cc.duration.toFixed(2) + ' с');
+    }
+  }
+
+  // Постановка по позе. Сцена автора сдвигает и крутит модель, а поза
+  // покоя в файле не совпадает с позой скина — поэтому меряем зверя
+  // прямо в клипе: от основания хвоста к носу — перёд, низ — на ноль.
+  if (UPRIGHT && skinned) {
+    const clip = clips.find((c) => c.name === UPRIGHT) || clips[0];
+    const mx = new THREE.AnimationMixer(root);
+    mx.clipAction(clip).play();
+    mx.setTime(0);
+    const W = new THREE.Group();
+    W.name = 'upright';
+    for (const ch of [...root.children]) W.add(ch);
+    root.add(W);
+    root.updateMatrixWorld(true);
+    const bone = (re) => { let b = null; root.traverse((o) => { if (!b && o.isBone && re.test(o.name)) b = o; }); return b; };
+    const nose = bone(/^nose/i), tail = bone(/^tail_1/i);
+    if (nose && tail) {
+      const h = nose.getWorldPosition(new THREE.Vector3()).sub(tail.getWorldPosition(new THREE.Vector3()));
+      W.rotation.y = -Math.atan2(h.x, h.z);
+      root.updateMatrixWorld(true);
+      const b = new THREE.Box3().setFromObject(W, true), cc = b.getCenter(new THREE.Vector3());
+      W.position.set(-cc.x, -b.min.y, -cc.z);
+      root.updateMatrixWorld(true);
+      log('поставлен по клипу ' + clip.name + ': разворот ' + (W.rotation.y * 180 / Math.PI).toFixed(0) + '°');
+    } else log('нос или хвост не найдены — постановка пропущена');
+    mx.stopAllAction();
+  }
+
+  // габарит (у зверя — в первом кадре клипа)
+  const box = new THREE.Box3().setFromObject(root, true);
+  const s = box.getSize(new THREE.Vector3());
+  log('габарит ' + [s.x, s.y, s.z].map((v) => v.toFixed(3)).join(' × ') + ', низ ' + box.min.y.toFixed(3) +
+    ', центр ' + box.getCenter(new THREE.Vector3()).toArray().map((v) => v.toFixed(3)).join(' '));
+
+  const glb = await new Promise((ok, no) => new GLTFExporter().parse(root, ok, no, { binary: true, animations: clips }));
+  кб += await put(OUT + '.glb', new Blob([glb]));
+  log('в проект: ' + Math.round(кб / 1024) + ' КБ');
+
+  // предпросмотр: три ракурса, у зверя — первые клипы посреди действия
+  const W = 900, H = 300;
+  const r = new THREE.WebGLRenderer({ canvas: document.getElementById('c'), antialias: true, preserveDrawingBuffer: true });
+  r.setPixelRatio(1); r.setSize(W, H); r.setScissorTest(true); r.outputColorSpace = THREE.SRGBColorSpace;
+  const sc = new THREE.Scene(); sc.background = new THREE.Color(0x2a2e34);
+  sc.add(new THREE.HemisphereLight(0xffffff, 0x445566, 2));
+  const d = new THREE.DirectionalLight(0xffffff, 2); d.position.set(0.6, 1, 0.5); sc.add(d);
+  if (previewCol) {
+    const t = new THREE.CanvasTexture(previewCol);
+    t.flipY = false; t.colorSpace = THREE.SRGBColorSpace;
+    root.traverse((o) => { if (o.isMesh) o.material = new THREE.MeshStandardMaterial({ map: t, roughness: 0.9 }); });
+  }
+  sc.add(root);
+  const c = box.getCenter(new THREE.Vector3());
+  const R = Math.max(s.x, s.y, s.z) * 1.2;
+  const cam = new THREE.PerspectiveCamera(30, (W / 3) / H, R / 100, R * 10);
+  const mixer = clips.length ? new THREE.AnimationMixer(root) : null;
+  const views = clips.length ? clips.slice(0, 3) : [null, null, null];
+  const dirs = [[0, 0.3, 1], [1, 0.25, 0.1], [0.7, 0.8, 0.7]];
+  views.forEach((clip, i) => {
+    if (mixer && clip) { mixer.stopAllAction(); const a = mixer.clipAction(clip); a.play(); mixer.setTime(clip.duration * 0.35); }
+    const v = clip ? [1, 0.2, 0.15] : dirs[i];
+    r.setViewport(i * W / 3, 0, W / 3, H); r.setScissor(i * W / 3 + 1, 1, W / 3 - 2, H - 2);
+    cam.position.set(c.x + v[0] * R * 2.2, c.y + v[1] * R * 2.2, c.z + v[2] * R * 2.2);
+    cam.lookAt(c); cam.updateProjectionMatrix(); r.render(sc, cam);
+  });
+  window.__done = { треугольников: Math.round(стало), кб: Math.round(кб / 1024), габарит: [s.x, s.y, s.z] };
+})().catch((e) => { log('ОШИБКА: ' + (e && e.stack || e)); window.__done = { ошибка: String(e) }; });
+</script></body></html>

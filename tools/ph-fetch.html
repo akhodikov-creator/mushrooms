@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><base href="../"><title>poly haven fetch</title></head>
+<body style="background:#111;color:#9fb;font:12px/1.5 monospace;padding:10px">
+<pre id="out">жду…</pre>
+<script type="module">
+/* Текстуры с Poly Haven -> компактные webp в проект.
+
+   Poly Haven отдаёт всё под CC0: можно что угодно, без указания
+   автора. Картинки там в jpg по мегабайту на карту — в игру они идут
+   ужатыми до нужного размера и перекодированными в webp.
+
+   Открывать с порта tools/serve.py — результат уходит запросом PUT.
+
+   ?ids=a,b,c                   ассеты
+   ?maps=Diffuse:1024,nor_gl:512  какие карты и до какого размера
+   ?out=assets/ground           куда класть (имя: <ассет>_<карта>.webp)
+   ?q=0.86                      качество webp
+*/
+const q = new URLSearchParams(location.search);
+const IDS = (q.get('ids') || '').split(',').map((s) => s.trim()).filter(Boolean);
+const MAPS = (q.get('maps') || 'Diffuse:1024,nor_gl:512').split(',')
+  .map((s) => { const [k, v] = s.split(':'); return [k, +(v || 1024)]; });
+const OUT = (q.get('out') || 'assets/ground').replace(/\/$/, '');
+const Q = +(q.get('q') || 0.86);
+
+const el = document.getElementById('out');
+const log = (t) => { el.textContent += '\n' + t; };
+
+(async () => {
+  el.textContent = 'ассетов: ' + IDS.length + ', карт: ' + MAPS.map((m) => m.join('@')).join(', ');
+  let итогКБ = 0, скачаноКБ = 0;
+  const отчёт = [];
+  for (const id of IDS) {
+    let files;
+    try { files = await (await fetch('https://api.polyhaven.com/files/' + id)).json(); }
+    catch (e) { log(id + ': каталог не ответил — ' + e.message); continue; }
+    for (const [map, size] of MAPS) {
+      const set = files[map];
+      if (!set) { log(id + ' / ' + map + ': такой карты нет'); continue; }
+      // берём ближайшее разрешение не меньше нужного
+      const res = size <= 1024 ? '1k' : size <= 2048 ? '2k' : '4k';
+      const src = (set[res] && (set[res].jpg || set[res].png)) || null;
+      if (!src) { log(id + ' / ' + map + ': нет ' + res); continue; }
+      const blob = await (await fetch(src.url)).blob();
+      скачаноКБ += blob.size / 1024;
+      const bmp = await createImageBitmap(blob);
+      const c = new OffscreenCanvas(size, size);
+      const g = c.getContext('2d');
+      g.imageSmoothingQuality = 'high';
+      g.drawImage(bmp, 0, 0, size, size);
+      const webp = await c.convertToBlob({ type: 'image/webp', quality: Q });
+      const path = OUT + '/' + id + '_' + map + '.webp';
+      const r = await fetch('/' + path, { method: 'PUT', body: webp });
+      итогКБ += webp.size / 1024;
+      const строка = id + ' / ' + map + ': ' + Math.round(blob.size / 1024) + ' КБ jpg ' + res +
+                     ' -> ' + Math.round(webp.size / 1024) + ' КБ webp ' + size + ' (' + r.status + ')';
+      log(строка);
+      отчёт.push({ id, map, кб: Math.round(webp.size / 1024), статус: r.status });
+    }
+  }
+  log('\nскачано ' + Math.round(скачаноКБ) + ' КБ, в проект ' + Math.round(итогКБ) + ' КБ');
+  window.__done = { скачаноКБ: Math.round(скачаноКБ), итогКБ: Math.round(итогКБ), файлы: отчёт };
+})();
+</script></body></html>

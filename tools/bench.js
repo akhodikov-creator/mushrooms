@@ -27,7 +27,8 @@ window.__bench = async (biome = 2, frames = 60) => {
     g.player.yaw = i * 0.05;                    // крутимся: просадки были при вращении
     g._update(1 / 60);
     const t = performance.now();
-    g.renderer.render(g.scene, g.camera);
+    // кадр целиком, с постобработкой, если она включена
+    if (g.render) g.render(); else g.renderer.render(g.scene, g.camera);
     gl.finish();
     dt.push(performance.now() - t);
     if ((i & 7) === 0) await new Promise(r => setTimeout(r, 0));

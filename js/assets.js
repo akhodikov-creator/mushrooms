@@ -207,10 +207,16 @@ const FINGER_KEYS = {
 
 /** Разбирает имя кости: какой палец и какая фаланга. */
 function parseBone(name) {
-  const n = name.toLowerCase();
+  // glTF дописывает к имени номер узла: «f_index02L_41». Его срезаем,
+  // иначе он читался бы номером фаланги.
+  const n = name.toLowerCase().replace(/_\d+$/, '');
+  // Пястные кости (palm_index…) не гнутся, концевые точки (…_end) —
+  // вообще не кости пальца, а маркеры кончика.
+  if (n.includes('palm') || n.endsWith('_end') || n.endsWith('end')) return null;
   for (const [finger, keys] of Object.entries(FINGER_KEYS)) {
     if (!keys.some((k) => n.includes(k))) continue;
-    const m = n.match(/(\d+)\s*$/) || n.match(/[._-](\d)/);
+    // номер фаланги: в конце («index_01») или в середине («f_index02l»)
+    const m = n.match(/(\d+)\s*$/) || n.match(/[._-](\d)/) || n.match(/(\d+)/);
     const joint = m ? Math.min(3, Math.max(1, parseInt(m[1], 10))) : 1;
     return { finger, joint };
   }
@@ -222,14 +228,17 @@ function parseBone(name) {
  * Возвращает число найденных костей: ноль значит, что модель без рига
  * и позу ей задать нельзя.
  */
-export function poseHandBones(root, curls, axis = 'z', sign = 1) {
+export function poseHandBones(root, curls, axis = 'z', sign = 1, thumbAxis = axis, thumbSign = sign) {
   let found = 0;
   root.traverse((o) => {
     if (!o.isBone) return;
     const p = parseBone(o.name);
     if (!p) return;
     const a = (p.finger === 'thumb' ? curls.thumb : curls.finger)[p.joint - 1] || 0;
-    o.rotation[axis] += a * sign;
+    // большой палец стоит к остальным под углом, и у многих ригов его
+    // кости повёрнуты иначе — ось сгиба у него бывает своя
+    if (p.finger === 'thumb') o.rotation[thumbAxis] += a * thumbSign;
+    else o.rotation[axis] += a * sign;
     found++;
   });
   // Имена вроде Bone001 не разбираются, а такие риги встречаются чаще

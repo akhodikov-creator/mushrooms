@@ -5,6 +5,8 @@ import { Leaderboard } from './leaderboard.js';
 import { Game } from './game.js';
 import { warmAssets } from './assets.js';
 import { loadPlants } from './plants.js';
+import { loadGround } from './ground.js';
+import { loadProps } from './props.js';
 import { setDemand, demandLabel } from './mushrooms.js';
 import { setDaySeed, todaySeed, seedLabel } from './utils.js';
 
@@ -41,11 +43,20 @@ warmAssets();
    Мегабайт успевает дойти, пока игрок вбивает ник. Если не дошёл,
    loadPlants вернёт false, и лес будет ровно таким, как до кита.
    Адрес с ?noplants=1 выключает кит: так можно сравнить лес до и
-   после, не трогая файлы. */
+   после, не трогая файлы.
+
+   Текстуры земли ждём тем же порядком и по той же причине: шейдер
+   грунта меняется до первой отрисовки, иначе он пересобирался бы прямо
+   в игре. ?noground=1 оставляет прежнюю землю, ?noprops=1 — прежние
+   пни, камни и папоротник. */
 UI.el['btn-play'].disabled = true;
-if (!/[?&]noplants=1/.test(location.search)) {
+{
+  const ждём = [];
+  if (!/[?&]noplants=1/.test(location.search)) ждём.push(loadPlants());
+  if (!/[?&]noground=1/.test(location.search)) ждём.push(loadGround());
+  if (!/[?&]noprops=1/.test(location.search)) ждём.push(loadProps());
   await Promise.race([
-    loadPlants(),
+    Promise.all(ждём),
     new Promise((ok) => setTimeout(() => ok(false), 12000)),
   ]);
 }

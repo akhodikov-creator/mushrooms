@@ -11,6 +11,7 @@ import { Body, applyBodyEnv } from './body.js';
 import { Inventory } from './inventory.js';
 import { Leaderboard } from './leaderboard.js';
 import { MAT_MUSHROOM_HL, SPECIES_BY_ID, applyMushroomEnv } from './mushrooms.js';
+import { Post } from './post.js';
 import {
   clamp, lerp, dampTo, fmtNum, terrainHeight, wrapDelta, isWater,
   forestType, FOREST_NAME,
@@ -47,9 +48,16 @@ const BUYER_LINES_FULL = [
 export class Game {
   constructor() {
     this.canvas = document.getElementById('c');
+    // Постобработка (post.js) — только на высоком качестве. Адрес с
+    // ?nopost=1 выключает её, чтобы сравнить картинку до и после.
+    // Ей нужен канал прозрачности у холста: по нему она находит небо.
+    const withPost = CONFIG.quality !== 'low' && !/[?&]nopost=1/.test(location.search);
     this.renderer = new THREE.WebGLRenderer({
-      canvas: this.canvas, antialias: true, powerPreference: 'high-performance',
+      canvas: this.canvas, antialias: true, powerPreference: 'high-performance', alpha: withPost,
     });
+    // Кадр теперь складывается из нескольких отрисовок, и счётчик
+    // вызовов обнуляем сами — раз в кадр, а не на каждой (см. render).
+    this.renderer.info.autoReset = false;
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 1.75));
     this.renderer.setSize(innerWidth, innerHeight);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -79,6 +87,8 @@ export class Game {
     this.lampLevel = 0;
 
     this.world = new World(this.scene);
+    this.post = withPost ? new Post(this.renderer) : null;
+    if (this.post) this.world.skyMat.uniforms.skyA.value = 0;
     const env = applyEnvMap(this.renderer, this.scene);
     applyWeaponEnv(env);
     applyAnimalEnv(env);
@@ -127,6 +137,14 @@ export class Game {
     this.camera.aspect = innerWidth / innerHeight;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(innerWidth, innerHeight);
+    if (this.post) this.post.setSize();
+  }
+
+  /** Кадр целиком: сцена и, если включена, постобработка поверх. */
+  render() {
+    this.renderer.info.reset();
+    if (this.post) this.post.render(this.scene, this.camera, this.world);
+    else this.renderer.render(this.scene, this.camera);
   }
 
   /* ============================================================
@@ -1057,7 +1075,7 @@ export class Game {
     if (this.state === 'playing') this._update(raw);
     else if (this.state === 'menu') this._updateMenu(raw);
 
-    this.renderer.render(this.scene, this.camera);
+    this.render();
     this._updatePerf(raw);
   }
 

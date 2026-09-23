@@ -10,11 +10,13 @@ import {
   MAT_MUSHROOM, MAT_MUSHROOM_NEAR, MAT_MUSHROOM_HL,
 } from './mushrooms.js';
 import {
-  groundTex, barkTex, birchTex, grassTex, leafTex, needleTex, lichenTex,
+  groundTex, barkTex, birchTex, grassTex, leafTex, needleTex, pineNeedleTex, lichenTex,
   metalTex, woodTex, getEnvMap,
 } from './textures.js';
 import { onAsset, instance } from './assets.js';
 import { plantsLoaded, plantTextures, hasPlants, scaledPart, scaledTree } from './plants.js';
+import { groundLoaded, groundArrays, pineBark } from './ground.js';
+import { propsLoaded, prop, stumpTop } from './props.js';
 
 const CS = CONFIG.chunkSize;
 const GRID = Math.round(WS / CS);          // 8
@@ -98,6 +100,29 @@ function addWind(mat, amp = 1, minY = 0) {
   return mat;
 }
 
+/**
+ * Хвоя, освещённая как объём, а не как стопка плоскостей.
+ *
+ * Нормали кроны смотрят от ствола наружу и чуть вверх (см. crownShade),
+ * и крона светится целиком: солнечный бок светлее, теневой мягче. Но
+ * двусторонний материал разворачивает нормаль у изнанки плоскости — и
+ * половина лап снова чернеет. Здесь разворот выключен: у кроны нет
+ * «изнанки», есть только сторона к солнцу и от него.
+ */
+function softFoliage(mat) {
+  const prev = mat.onBeforeCompile;
+  const key = mat.customProgramCacheKey;
+  mat.onBeforeCompile = (shader, r) => {
+    prev(shader, r);
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <normal_fragment_begin>',
+      THREE.ShaderChunk.normal_fragment_begin.replace('normal *= faceDirection;', ''),
+    );
+  };
+  mat.customProgramCacheKey = () => key() + '_soft';
+  return mat;
+}
+
 const texBark = barkTex(); texBark.repeat.set(2, 5);
 const texBirch = birchTex(); texBirch.repeat.set(1.6, 4);
 const texGround = groundTex(); texGround.repeat.set(16, 16);
@@ -112,10 +137,23 @@ const MAT = {
   birch: new THREE.MeshStandardMaterial({
     vertexColors: true, map: texBirch, roughness: 0.85, metalness: 0,
   }),
-  needle: addWind(new THREE.MeshLambertMaterial({
+  needle: softFoliage(addWind(new THREE.MeshLambertMaterial({
     vertexColors: true, map: needleTex(), alphaTest: 0.42,
     side: THREE.DoubleSide,
-  }), 0.010, 1.5),
+  }), 0.010, 1.5)),
+  // у сосны своя хвоя — длинная, пучками (см. pineNeedleTex)
+  pineNeedle: softFoliage(addWind(new THREE.MeshLambertMaterial({
+    vertexColors: true, map: pineNeedleTex(), alphaTest: 0.42,
+    side: THREE.DoubleSide,
+  }), 0.010, 1.5)),
+  // Кора сосны и ели. Пока скан не загрузился (или его нет) — прежняя
+  // процедурная; фото кладёт initBark. Обе коры тёмные, почти чёрные в
+  // линейном свете, — множитель в color вытягивает их, иначе рыжий
+  // верх сосны оставался бурым.
+  conBark: new THREE.MeshStandardMaterial({
+    vertexColors: true, map: texBark, roughness: 0.95, metalness: 0,
+    color: new THREE.Color(2.2, 2.2, 2.2),
+  }),
   leaf: addWind(new THREE.MeshLambertMaterial({
     vertexColors: true, map: leafTex(), alphaTest: 0.42,
     side: THREE.DoubleSide,
@@ -189,8 +227,8 @@ function paint(geo, hex, jitter = 0) {
 }
 
 /** Ствол с сужением и лёгким изгибом — прямые цилиндры сразу выдают процедурку. */
-function trunkGeo(h, rBottom, rTop, bend = 0.25, col = 0xffffff) {
-  const g = new THREE.CylinderGeometry(rTop, rBottom, h, 9, 6);
+function trunkGeo(h, rBottom, rTop, bend = 0.25, col = 0xffffff, seg = 6) {
+  const g = new THREE.CylinderGeometry(rTop, rBottom, h, 9, seg);
   const pos = g.attributes.position;
   const bx = (Math.random() - 0.5) * bend, bz = (Math.random() - 0.5) * bend;
   for (let i = 0; i < pos.count; i++) {
@@ -241,36 +279,129 @@ function leafCluster(size, x, y, z, col) {
   return parts;
 }
 
-function buildPine() {
-  const h = 15;
-  const tr = mergeParts([trunkGeo(h, 0.46, 0.17, 0.5, 0xb08a5e)]);
-  const fol = [];
-  for (let w = 0; w < 5; w++) {
-    const t = w / 4;
-    const y = h * (0.5 + t * 0.48);
-    const len = 3.0 - t * 1.7;
-    const n = 9 - w;
-    for (let i = 0; i < n; i++) {
-      fol.push(...frond(len, len * 0.78, 0.12 + t * 0.1, (i / n) * TAU + w * 0.7, y, 0x5d8236));
-    }
+/**
+ * Свет и тень внутри хвойной кроны — вершинными цветами и нормалями.
+ *
+ * Нормаль каждой вершины смотрит от ствола наружу и вверх, как у
+ * конуса: крона освещается как одно целое (см. softFoliage). Цвет
+ * темнеет к стволу и к низу кроны — туда солнце не пробивается, и
+ * глубина кроны читается даже в тени. Кончики лап — свежий светлый
+ * прирост, как у настоящей ели в июле.
+ */
+function crownShade(geo, yBottom, yTop, rMax) {
+  const p = geo.attributes.position, c = geo.attributes.color;
+  const n = new Float32Array(p.count * 3);
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), y = p.getY(i), z = p.getZ(i);
+    const r = Math.hypot(x, z);
+    const k = Math.min(1, r / (rMax * 0.35));
+    let nx = r > 1e-4 ? (x / r) * k : 0, ny = 0.55 + (1 - k) * 0.6, nz = r > 1e-4 ? (z / r) * k : 0;
+    const l = Math.hypot(nx, ny, nz);
+    n[i * 3] = nx / l; n[i * 3 + 1] = ny / l; n[i * 3 + 2] = nz / l;
+    const along = Math.min(1, r / rMax);
+    const up = Math.min(1, Math.max(0, (y - yBottom) / (yTop - yBottom)));
+    const sh = (0.6 + 0.5 * along) * (0.78 + 0.32 * up);
+    c.setXYZ(i, c.getX(i) * sh, c.getY(i) * sh * (1 + along * 0.05), c.getZ(i) * sh);
   }
-  return { trunk: tr, foliage: mergeParts(fol) };
+  geo.setAttribute('normal', new THREE.BufferAttribute(n, 3));
+  return geo;
 }
 
-function buildSpruce() {
-  const h = 17;
-  const tr = mergeParts([trunkGeo(h, 0.42, 0.13, 0.3, 0x8a6a44)]);
+/**
+ * Ствол по высоте: снизу серо-бурая кора, выше — своя окраска породы.
+ * Цвета — множители в линейном пространстве и могут быть больше
+ * единицы: фото-кора тёмная, и без этого рыжий верх сосны тонул в ней.
+ */
+function trunkTint(geo, h, low, high, from, to) {
+  const p = geo.attributes.position, c = geo.attributes.color;
+  for (let i = 0; i < p.count; i++) {
+    let k = Math.min(1, Math.max(0, (p.getY(i) / h - from) / (to - from)));
+    k = k * k * (3 - 2 * k);
+    const j = c.getX(i);          // дрожание яркости из paint сохраняем
+    c.setXYZ(i, (low[0] + (high[0] - low[0]) * k) * j,
+      (low[1] + (high[1] - low[1]) * k) * j, (low[2] + (high[2] - low[2]) * k) * j);
+  }
+  return geo;
+}
+
+/**
+ * Сосна обыкновенная: высокий голый ствол, снизу серый и бороздчатый,
+ * к верху рыжий — по нему сосну и узнают издалека. Крона только в
+ * верхней трети и держится на сучьях: от ствола расходятся рыжие ветви,
+ * и хвоя сидит клоками на их концах. Если сажать лапы прямо на ствол,
+ * как у ели, сосна выходит пальмой.
+ */
+function buildPine() {
+  const h = 15;
+  const RUST = [2.1, 1.0, 0.5];
+  const parts = [trunkTint(trunkGeo(h, 0.46, 0.15, 0.5, 0xffffff, 10), h,
+    [1.15, 1.05, 0.95], RUST, 0.3, 0.62)];
   const fol = [];
-  for (let w = 0; w < 9; w++) {
-    const t = w / 8;
-    const y = 1.8 + t * (h - 3.2);
-    const len = 3.4 - t * 2.7;
-    const n = Math.max(5, 10 - w);
-    for (let i = 0; i < n; i++) {
-      fol.push(...frond(len, len * 0.82, -0.22 - t * 0.12, (i / n) * TAU + w * 0.55, y, 0x3d6128));
+  const nB = 10;
+  for (let b = 0; b < nB; b++) {
+    const t = b / (nB - 1);
+    const y0 = h * (0.6 + t * 0.34);
+    const a = b * 2.4 + Math.random() * 0.7;          // по спирали, как растут сучья
+    const L = (2.7 - t * 1.5) * (0.8 + Math.random() * 0.4);
+    const rise = 0.3 + Math.random() * 0.4;           // сук идёт вверх под углом
+    const limb = new THREE.CylinderGeometry(0.035, 0.085, L, 5, 1);
+    limb.translate(0, L / 2, 0);
+    limb.rotateZ(-(Math.PI / 2 - rise));
+    limb.rotateY(a);
+    limb.translate(0, y0, 0);
+    const lc = paint(limb, 0xffffff, 0.1);
+    for (let i = 0; i < lc.attributes.color.count; i++) {
+      const j = lc.attributes.color.getX(i);
+      lc.attributes.color.setXYZ(i, RUST[0] * j, RUST[1] * j, RUST[2] * j);
+    }
+    parts.push(lc);
+    // клоки хвои вдоль сука, гуще к концу
+    for (const f of [0.5, 0.78, 1.0]) {
+      const ex = Math.cos(rise) * L * f, ey = y0 + Math.sin(rise) * L * f;
+      const ox = ex * Math.cos(a), oz = -ex * Math.sin(a);
+      const k = f === 1.0 ? 3 : f > 0.6 ? 2 : 1;
+      for (let i = 0; i < k; i++) {
+        const len = (1.3 + Math.random() * 0.8) * (1.1 - t * 0.35);
+        for (const g of frond(len, len * 0.85, -0.1 + Math.random() * 0.6,
+          Math.random() * TAU, 0, 0x7a9e48)) {
+          g.translate(ox, ey, oz);
+          fol.push(g);
+        }
+      }
     }
   }
-  return { trunk: tr, foliage: mergeParts(fol) };
+  // макушка: несколько лап вокруг верхушки ствола
+  for (let i = 0; i < 5; i++) {
+    fol.push(...frond(1.3 + Math.random() * 0.5, 1.1, 0.3 + Math.random() * 0.5,
+      Math.random() * TAU, h - 0.6 - Math.random() * 0.8, 0x80a64c));
+  }
+  return { trunk: mergeParts(parts), foliage: crownShade(mergeParts(fol), h * 0.6, h, 3.4) };
+}
+
+/**
+ * Ель: плотный узкий конус до самой земли, лапы свисают. Ярусы не
+ * ровные: у каждой лапы свой угол, длина и высота — иначе ель выглядит
+ * стопкой одинаковых тарелок.
+ */
+function buildSpruce() {
+  const h = 17;
+  const tr = mergeParts([trunkTint(trunkGeo(h, 0.42, 0.13, 0.3, 0xffffff), h,
+    [1.0, 0.92, 0.84], [1.15, 0.9, 0.7], 0.2, 0.8)]);
+  const fol = [];
+  const tiers = 11;
+  for (let w = 0; w < tiers; w++) {
+    const t = w / (tiers - 1);
+    const n = Math.max(4, Math.round(8 - t * 4));
+    for (let i = 0; i < n; i++) {
+      const y = 1.5 + t * (h - 2.6) + (Math.random() - 0.5) * 0.5;
+      const len = (3.3 - t * 2.75) * (0.8 + Math.random() * 0.35);
+      fol.push(...frond(len, len * 0.85, -0.18 - t * 0.1 - Math.random() * 0.2,
+        ((i + Math.random() * 0.7) / n) * TAU + w * 1.3, y, 0x4e7440));
+    }
+  }
+  // макушка — торчащая вверх свечка
+  fol.push(...frond(1.1, 0.7, 1.35, Math.random() * TAU, h - 1.2, 0x5f8a3a));
+  return { trunk: tr, foliage: crownShade(mergeParts(fol), 1.2, h, 3.4) };
 }
 
 function buildBirch() {
@@ -499,6 +630,9 @@ function initGeometries() {
   GEO.stump = buildStump();
   GEO.log = buildLog();
   initKit();
+  initGround();
+  initProps();
+  initBark();
 }
 
 /**
@@ -579,10 +713,231 @@ function treeMats(t, kit) {
   return [t === 'birch' ? MAT.kitBirch : MAT.kitBark, MAT.kitLeaf];
 }
 
+/**
+ * Фото-кора на сосну и ель. Развёртка цилиндра — один оборот по
+ * ширине и вся высота по длине, так что повтор нужен вытянутый: два
+ * раза вокруг ствола и девять — снизу доверху (около полутора-двух
+ * метров коры на повтор, как у настоящего ствола).
+ */
+function initBark() {
+  const b = pineBark();
+  if (!b || MAT.conBark.map === b.col) return;
+  b.col.repeat.set(2, 9);
+  b.nrm.repeat.set(2, 9);
+  MAT.conBark.map = b.col;
+  MAT.conBark.normalMap = b.nrm;
+  MAT.conBark.needsUpdate = true;
+}
+
+/* ============================================================
+   Предметы леса: пни, коряга, камни, папоротник, ветки
+   ============================================================
+   Фотосканы с Poly Haven (см. props.js). Процедурные заготовки
+   остаются запаской: без файлов лес собирается как раньше.
+   ------------------------------------------------------------ */
+function initProps() {
+  if (GEO.props || !propsLoaded()) return;
+  const mat = (id, extra = {}) => {
+    const p = prop(id);
+    return p ? new THREE.MeshStandardMaterial({
+      vertexColors: true, map: p.col, normalMap: p.nrm, roughness: 0.95, metalness: 0, ...extra,
+    }) : null;
+  };
+  const P = {};
+  // пни: у каждого свой скан и своя высота спила — на неё садятся опята
+  const stumps = [];
+  for (const id of ['tree_stump_01', 'tree_stump_02']) {
+    const p = prop(id), m = mat(id);
+    if (p && m) stumps.push({ geo: p.variants[0], mat: m, top: stumpTop(p.variants[0]) });
+  }
+  if (stumps.length) P.stumps = stumps;
+  // скан коряги тёмный, в тени ельника она сливалась в чёрную полосу
+  if (prop('dead_tree_trunk')) P.log = { geo: prop('dead_tree_trunk').variants[0], mat: mat('dead_tree_trunk', { color: new THREE.Color(1.4, 1.35, 1.25) }) };
+  if (prop('rock_moss_set_01')) P.rocks = { geos: prop('rock_moss_set_01').variants, mat: mat('rock_moss_set_01') };
+  // Папоротник — тонкие листья, их видно с обеих сторон; вдобавок он
+  // колышется, как и прочий подлесок. Ветки — замкнутые прутья: обратная
+  // сторона им не нужна, а карта нормалей на палочке в пару сантиметров
+  // только чернит её. Кору чуть осветляем: сухой хворост серый, светлее
+  // подстилки, иначе его на земле не видно.
+  if (prop('fern_02')) {
+    P.fern = { geo: prop('fern_02').variants[0],
+      mat: addWind(mat('fern_02', { side: THREE.DoubleSide, roughness: 0.9 }), 0.07, 0.15) };
+  }
+  if (prop('dry_branches_medium_01')) {
+    P.branch = { geo: prop('dry_branches_medium_01').variants[0],
+      mat: mat('dry_branches_medium_01', { normalMap: null, color: new THREE.Color(1.5, 1.45, 1.35) }) };
+  }
+  GEO.props = P;
+}
+
+/** Детерминированное «случайное» число из координат, не трогая генератор чанка. */
+const hash01 = (x, z) => { const v = Math.sin(x * 12.9898 + z * 78.233) * 43758.5453; return v - Math.floor(v); };
+
+/* ============================================================
+   Земля по выделам
+   ============================================================
+   Фото-текстуры лежат в массивах (см. ground.js), а какой слой где —
+   решает карта выделов: текстура 256×256 на весь мир, по четыре метра
+   на пиксель. Мир зациклен, и карта зацикливается вместе с ним сама,
+   повтором текстуры, без швов.
+
+   Выдел берём той же функцией forestType, по которой игра растит
+   грибы: иначе боровики росли бы на песке, а песок лежал бы в другом
+   месте. Сглаживание между выделами даёт билинейная фильтрация карты —
+   переход в четыре метра, как опушка.
+
+   Каналы: [бор, ельник, березняк, осинник] и [поляна, низина, берег,
+   склон]. Берег и склон не выделы, но земля там своя: у воды ил, на
+   крутизне голый грунт.
+   ------------------------------------------------------------ */
+const BIOME_RES = 256;
+// в какой слой массива смотрит каждый канал и чем его подкрасить
+const G_LAYER = [0, 1, 2, 3, 1, 4, 4, 0];
+// Сканы сняты при ровном рассеянном свете, а у нас в полдень солнце в
+// два раза ярче неба, и в полную силу подстилка выцветала до бежевого.
+// Поэтому почти все слои приглушены — кроме бора: светлый песок издалека
+// и есть примета, где искать боровики.
+const G_TINT = [
+  [1.0, 0.99, 0.94],     // бор: светлый песок — по нему и ищут белые
+  [0.72, 0.8, 0.7],      // ельник: темнее и сырее
+  [0.84, 0.82, 0.8],     // березняк
+  [0.86, 0.82, 0.78],    // осинник
+  [0.92, 0.98, 0.74],    // поляна: тот же мох, но выгоревший на солнце
+  [0.76, 0.84, 0.74],    // низина
+  [0.62, 0.62, 0.58],    // берег: мокрый ил
+  [0.74, 0.66, 0.56],    // склон: голый грунт
+];
+
+const smooth = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+
+function buildBiomeMap() {
+  const n = BIOME_RES, step = WS / n;
+  const d0 = new Uint8Array(n * n * 4), d1 = new Uint8Array(n * n * 4);
+  for (let j = 0; j < n; j++) {
+    for (let i = 0; i < n; i++) {
+      const x = (i + 0.5) * step, z = (j + 0.5) * step;
+      const h = terrainHeight(x, z);
+      const w = [0, 0, 0, 0, 0, 0, 0, 0];
+      const shore = smooth(WATER_LEVEL + 1.3, WATER_LEVEL + 0.4, h);
+      const slope = smooth(0.36, 0.56, terrainSlope(x, z)) * (1 - shore);
+      w[forestType(x, z)] = (1 - shore) * (1 - slope);
+      w[6] = shore;
+      w[7] = slope;
+      const k = (j * n + i) * 4;
+      for (let c = 0; c < 4; c++) {
+        d0[k + c] = Math.round(w[c] * 255);
+        d1[k + c] = Math.round(w[c + 4] * 255);
+      }
+    }
+  }
+  const mk = (d) => {
+    const t = new THREE.DataTexture(d, n, n, THREE.RGBAFormat, THREE.UnsignedByteType);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.magFilter = THREE.LinearFilter;
+    t.minFilter = THREE.LinearMipmapLinearFilter;
+    t.generateMipmaps = true;
+    t.needsUpdate = true;
+    return t;
+  };
+  return [mk(d0), mk(d1)];
+}
+
+/**
+ * Подмена шейдера земли. Вызывается один раз, до первой отрисовки:
+ * после неё смена программы — это пересборка шейдера прямо в игре.
+ */
+function initGround() {
+  if (MAT.ground.userData.splat || !groundLoaded()) return;
+  const A = groundArrays();
+  const [bio0, bio1] = buildBiomeMap();
+  // Шаг текстуры подобран так, чтобы в мир укладывалось целое число
+  // повторов. Иначе на переходе через край зацикленного мира земля под
+  // ногами прыгала бы на долю плитки.
+  const TILE = WS / 400;      // 2.5 м — масштаб скана
+  const MACRO = WS / 100;     // 10 м — крупная копия, гасит повторы
+  const f = (v) => v.toFixed(5);
+  const layers = 'const int G_LAYER[8] = int[8](' + G_LAYER.join(',') + ');';
+  const tints = 'const vec3 G_TINT[8] = vec3[8](' +
+    G_TINT.map((t) => 'vec3(' + t.map(f).join(',') + ')').join(',') + ');';
+
+  const m = MAT.ground;
+  m.map = null;              // цвет теперь целиком из сканов
+  m.userData.splat = true;
+  m.onBeforeCompile = (sh) => {
+    sh.uniforms.uGCol = { value: A.col };
+    sh.uniforms.uGNrm = { value: A.nrm };
+    sh.uniforms.uBio0 = { value: bio0 };
+    sh.uniforms.uBio1 = { value: bio1 };
+
+    sh.vertexShader = 'varying vec3 vGPos;\nvarying vec3 vGNrm;\n' + sh.vertexShader.replace(
+      '#include <worldpos_vertex>',
+      `#include <worldpos_vertex>
+       vGPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
+       vGNrm = normalize(mat3(modelMatrix) * objectNormal);`);
+
+    sh.fragmentShader = `
+      uniform highp sampler2DArray uGCol;
+      uniform highp sampler2DArray uGNrm;
+      uniform sampler2D uBio0;
+      uniform sampler2D uBio1;
+      varying vec3 vGPos;
+      varying vec3 vGNrm;
+      ${layers}
+      ${tints}
+    ` + sh.fragmentShader
+      .replace('#include <map_fragment>', `
+        vec2 bUV = vGPos.xz / ${f(WS)};
+        vec4 bw0 = texture2D(uBio0, bUV);
+        vec4 bw1 = texture2D(uBio1, bUV);
+        float gW[8] = float[8](bw0.r, bw0.g, bw0.b, bw0.a, bw1.r, bw1.g, bw1.b, bw1.a);
+        vec2 gUV = vGPos.xz / ${f(TILE)};
+        vec2 mUV = vGPos.xz / ${f(MACRO)} + vec2(0.37, 0.71);
+        // производные считаем заранее, вне ветвлений: иначе в ветке с
+        // пропущенным слоем мип-уровень выбирался бы наугад
+        vec2 gdx = dFdx(gUV), gdy = dFdy(gUV);
+        vec2 mdx = dFdx(mUV), mdy = dFdy(mUV);
+        vec3 gCol = vec3(0.0);
+        vec3 gNt = vec3(0.0);
+        float gSum = 0.0;
+        for (int i = 0; i < 8; i++) {
+          float w = gW[i];
+          if (w < 0.004) continue;          // слоя здесь нет — не читаем
+          float L = float(G_LAYER[i]);
+          vec3 near = textureGrad(uGCol, vec3(gUV, L), gdx, gdy).rgb;
+          vec3 far = textureGrad(uGCol, vec3(mUV, L), mdx, mdy).rgb;
+          gCol += mix(near, far, 0.3) * G_TINT[i] * w;
+          gNt += (textureGrad(uGNrm, vec3(gUV, L), gdx, gdy).xyz * 2.0 - 1.0) * w;
+          gSum += w;
+        }
+        gCol /= max(gSum, 0.0001);
+        gNt /= max(gSum, 0.0001);
+        // чуть поднимаем насыщенность: издали мипмапы усредняют пёструю
+        // подстилку в серый, и лес начинал выглядеть пыльным
+        gCol = max(mix(vec3(dot(gCol, vec3(0.3333))), gCol, 1.14), 0.0);
+        diffuseColor.rgb *= gCol;
+      `)
+      // вершинный цвет у грунта подкрашивал выделы — теперь это делают
+      // сами сканы, и двойная подкраска только замутила бы их
+      .replace('#include <color_fragment>', '')
+      .replace('#include <normal_fragment_maps>', `
+        {
+          vec3 N = normalize(vGNrm);
+          vec3 T = normalize(vec3(1.0, 0.0, 0.0) - N * N.x);
+          vec3 B = cross(T, N);
+          vec3 tn = normalize(vec3(gNt.xy, max(gNt.z, 0.25)));
+          vec3 nW = normalize(T * tn.x + B * tn.y + N * tn.z);
+          normal = normalize((viewMatrix * vec4(nW, 0.0)).xyz);
+        }
+      `);
+  };
+  m.customProgramCacheKey = () => 'ground-splat';
+  m.needsUpdate = true;
+}
+
 /** Какой материал у ствола и кроны каждой породы. */
 const TREE_MAT = {
-  pine: { trunk: 'bark', foliage: 'needle' },
-  spruce: { trunk: 'bark', foliage: 'needle' },
+  pine: { trunk: 'conBark', foliage: 'pineNeedle' },
+  spruce: { trunk: 'conBark', foliage: 'needle' },
   birch: { trunk: 'birch', foliage: 'leaf' },
   aspen: { trunk: 'bark', foliage: 'leaf' },
 };
@@ -768,6 +1123,10 @@ class Chunk {
     this.built = true;
     initGeometries();
     const rnd = rng(((this.cx * 374761393) ^ (this.cz * 668265263) ^ 0xa17) >>> 0);
+    // Для всего, что есть только с китом или появилось позже, — свой
+    // генератор. Вызовы общего от этого не зависят, и раскладка чанка
+    // одна у всех игроков, как бы ни загрузились у них файлы.
+    const rnd2 = rng(((this.cx * 2654435761) ^ (this.cz * 40503) ^ 0x51ed) >>> 0);
     const g = this.group;
 
     /* --- земля --- */
@@ -856,8 +1215,13 @@ class Chunk {
       const s = 0.72 + rnd() * 0.62;
       // Подрост реже взрослого дерева: сплошной молодняк читается
       // кустарником, а не лесом.
+      // Вариант берём из координат, а не из генератора чанка. Раньше
+      // лишние вызовы случались только с загруженным китом, и дальше по
+      // чанку у такого игрока сдвигалось всё — в том числе пни, а с ними
+      // и опята. Лес дня должен быть один на всех, дошёл кит или нет.
       const nv = treeVariants(t).length;
-      const v = nv < 2 ? 0 : (rnd() < 0.72 ? 0 : 1 + ((rnd() * (nv - 1)) | 0));
+      const hv = hash01(lx, lz);
+      const v = nv < 2 ? 0 : (hv < 0.72 ? 0 : 1 + (((hv - 0.72) / 0.28 * (nv - 1)) | 0));
       byType[t].push({ lx, lz, y: terrainHeight(wx, wz), s, v, rot: rnd() * TAU });
       this.treeCols.push(lx, lz, 0.34 * s + 0.2);
     }
@@ -918,20 +1282,28 @@ class Chunk {
       const lx = rnd() * CS, lz = rnd() * CS;
       const wx = this.baseX + lx, wz = this.baseZ + lz;
       if (isWater(wx, wz)) continue;
-      stumpList.push({ lx, lz, y: terrainHeight(wx, wz), rot: rnd() * TAU });
-      this.stumps.push({ x: lx, z: lz });
+      const kS = GEO.props && GEO.props.stumps;
+      const v = kS ? Math.floor(hash01(lx, lz) * kS.length) : 0;
+      stumpList.push({ lx, lz, y: terrainHeight(wx, wz), rot: rnd() * TAU, v });
+      // высота спила нужна опятам: они садятся на пень, а не рядом
+      this.stumps.push({ x: lx, z: lz, top: kS ? kS[v].top : 0.5 });
     }
-    if (stumpList.length) {
-      const im = new THREE.InstancedMesh(GEO.stump, MAT.prop, stumpList.length);
-      stumpList.forEach((o, i) => {
+    // по мешу на вариант: у сканов разные текстуры
+    const stumpSets = (GEO.props && GEO.props.stumps) || [{ geo: GEO.stump, mat: MAT.prop }];
+    stumpSets.forEach((set, vi) => {
+      const list = stumpList.filter((o) => (o.v || 0) === vi);
+      if (!list.length) return;
+      const im = new THREE.InstancedMesh(set.geo, set.mat, list.length);
+      list.forEach((o, i) => {
         q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), o.rot);
-        im.setMatrixAt(i, m4.compose(v3.set(o.lx, o.y, o.lz), q, sc.set(1, 1, 1)));
+        im.setMatrixAt(i, m4.compose(v3.set(o.lx, o.y - 0.03, o.lz), q, sc.set(1, 1, 1)));
       });
       im.instanceMatrix.needsUpdate = true;
+      im.castShadow = true;
       im.receiveShadow = true;
       im.computeBoundingSphere();
       g.add(im);
-    }
+    });
 
     /* --- валежник --- */
     const nLogs = 1 + ((rnd() * 2) | 0);
@@ -943,11 +1315,28 @@ class Chunk {
       logList.push({ lx, lz, y: terrainHeight(wx, wz), rot: rnd() * TAU });
     }
     if (logList.length) {
-      const im = new THREE.InstancedMesh(GEO.log, MAT.prop, logList.length);
+      const kL = GEO.props && GEO.props.log;
+      const im = new THREE.InstancedMesh(kL ? kL.geo : GEO.log, kL ? kL.mat : MAT.prop, logList.length);
       logList.forEach((o, i) => {
         q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), o.rot);
-        im.setMatrixAt(i, m4.compose(v3.set(o.lx, o.y, o.lz), q, sc.set(1, 1, 1)));
+        // скан лежит на земле целиком, чуть утапливаем — он же гниёт в подстилке.
+        // Сам ствол тонкий, как жердь (три метра на тридцать сантиметров):
+        // делаем толще и длиннее, чтобы это было бревно, а не палка.
+        let y = o.y;
+        if (kL) {
+          sc.set(1.3, 2.0, 2.0);
+          // Четыре метра на склоне — один конец висел бы в воздухе, другой
+          // уходил в землю. Кладём по рельефу: берём высоту на обоих концах
+          // и наклоняем ствол вдоль его оси.
+          const L = 1.9, cx = Math.cos(o.rot) * L, cz = -Math.sin(o.rot) * L;
+          const wx = this.baseX + o.lx, wz = this.baseZ + o.lz;
+          const hA = terrainHeight(wx + cx, wz + cz), hB = terrainHeight(wx - cx, wz - cz);
+          q.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.atan2(hA - hB, 2 * L)));
+          y = (hA + hB) / 2 - 0.12;
+        } else sc.set(1, 1, 1);
+        im.setMatrixAt(i, m4.compose(v3.set(o.lx, y, o.lz), q, sc));
       });
+      im.castShadow = !!kL;
       im.instanceMatrix.needsUpdate = true;
       im.receiveShadow = true;
       im.computeBoundingSphere();
@@ -958,13 +1347,18 @@ class Chunk {
     // Сухие места и сырые получают разный подлесок. Из кита на каждую
     // группу идёт по нескольку форм: один и тот же куст, повторённый
     // шестнадцать раз на чанк, слишком заметно повторяется.
+    // В сырых местах — папоротник со скана, если он приехал: в ельнике и
+    // низине это главный подлесок, кустов там почти нет.
+    const kF = GEO.props && GEO.props.fern;
     const dry = GEO.kitBush || [GEO.bush];
-    const wet = GEO.kitWet || [GEO.fern];
+    const wet = kF ? [kF.geo] : (GEO.kitWet || [GEO.fern]);
     const bMat = GEO.kitBush ? MAT.kitLeaf : MAT.bush;
-    const wMat = GEO.kitWet ? MAT.kitLeaf : MAT.bush;
+    const wMat = kF ? kF.mat : (GEO.kitWet ? MAT.kitLeaf : MAT.bush);
     const sets = [];
     for (const g of dry) sets.push({ geo: g, mat: bMat, list: [] });
-    for (const g of wet) sets.push({ geo: g, mat: wMat, list: [] });
+    // скан широкий и низкий (два метра на сорок сантиметров): ужимаем
+    // вширь и вытягиваем вверх, до колена-пояса, как орляк в ельнике
+    for (const g of wet) sets.push({ geo: g, mat: wMat, list: [], ks: kF ? [0.6, 2.0] : null });
     const nDry = dry.length;
     for (let i = 0; i < CONFIG.bushesPerChunk; i++) {
       const lx = rnd() * CS, lz = rnd() * CS;
@@ -979,22 +1373,25 @@ class Chunk {
     if (GEO.kitFlower) {
       const fl = { geo: GEO.kitFlower, mat: MAT.kitLeaf, list: [] };
       for (let i = 0; i < 14; i++) {
-        const lx = rnd() * CS, lz = rnd() * CS;
+        const lx = rnd2() * CS, lz = rnd2() * CS;
         const wx = this.baseX + lx, wz = this.baseZ + lz;
         if (isWater(wx, wz)) continue;
         const b = forestType(wx, wz);
         if (b !== FOREST.MEADOW && b !== FOREST.BEREZNYAK) continue;
-        fl.list.push({ lx, lz, y: terrainHeight(wx, wz), s: 0.7 + rnd() * 0.7, rot: rnd() * TAU });
+        fl.list.push({ lx, lz, y: terrainHeight(wx, wz), s: 0.7 + rnd2() * 0.7, rot: rnd2() * TAU });
       }
       sets.push(fl);
     }
-    for (const { list, geo, mat } of sets) {
+    for (const { list, geo, mat, ks } of sets) {
       if (!list.length || !geo) continue;
       const im = new THREE.InstancedMesh(geo, mat, list.length);
+      const [kx, ky] = ks || [1, 1];
       list.forEach((o, i) => {
         q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), o.rot);
-        im.setMatrixAt(i, m4.compose(v3.set(o.lx, o.y, o.lz), q, sc.set(o.s, o.s, o.s)));
-        const j = 0.8 + rnd() * 0.4;
+        im.setMatrixAt(i, m4.compose(v3.set(o.lx, o.y, o.lz), q, sc.set(o.s * kx, o.s * kx * ky, o.s * kx)));
+        // оттенок из координат, а не из генератора: число ромашек зависит
+        // от кита, и вызовы генератора разъехались бы
+        const j = 0.8 + hash01(o.lx, o.lz) * 0.4;
         im.setColorAt(i, tint.setRGB(j, j, j));
       });
       im.instanceMatrix.needsUpdate = true;
@@ -1013,18 +1410,74 @@ class Chunk {
         s: 0.6 + rnd() * 1.5, rot: rnd() * TAU,
       });
     }
-    const rim = new THREE.InstancedMesh(GEO.rock, MAT.rock, rocks.length);
-    rocks.forEach((o, i) => {
-      q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), o.rot);
-      rim.setMatrixAt(i, m4.compose(v3.set(o.lx, o.y, o.lz), q, sc.set(o.s, o.s * 0.8, o.s)));
-      const j = 0.8 + rnd() * 0.45;
-      rim.setColorAt(i, tint.setRGB(j, j, j));
-    });
-    rim.instanceMatrix.needsUpdate = true;
-    if (rim.instanceColor) rim.instanceColor.needsUpdate = true;
-    rim.receiveShadow = true;
-    rim.computeBoundingSphere();
-    g.add(rim);
+    const kR = GEO.props && GEO.props.rocks;
+    if (kR) {
+      // Камней со скана шесть, но на чанк берём два: каждый вариант — это
+      // отдельный вызов отрисовки, а камней в чанке всего пять.
+      const n = kR.geos.length;
+      const vA = (this.cx * 3 + this.cz * 5) % n;
+      let vB = (this.cx * 7 + this.cz * 11 + 3) % n;
+      if (vB === vA) vB = (vA + 1) % n;
+      for (const vi of [vA, vB]) {
+        const list = rocks.filter((o) => (hash01(o.lx, o.lz) < 0.5 ? vA : vB) === vi);
+        if (!list.length) continue;
+        const im = new THREE.InstancedMesh(kR.geos[vi], kR.mat, list.length);
+        list.forEach((o, i) => {
+          q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), o.rot);
+          // сканы в натуральную величину, по два-три метра: ужимаем
+          const k = o.s * 0.34;
+          im.setMatrixAt(i, m4.compose(v3.set(o.lx, o.y + 0.08, o.lz), q, sc.set(k, k, k)));
+          const j = 0.85 + hash01(o.lz, o.lx) * 0.3;
+          im.setColorAt(i, tint.setRGB(j, j, j));
+        });
+        im.instanceMatrix.needsUpdate = true;
+        if (im.instanceColor) im.instanceColor.needsUpdate = true;
+        im.castShadow = true;
+        im.receiveShadow = true;
+        im.computeBoundingSphere();
+        g.add(im);
+      }
+    } else {
+      const rim = new THREE.InstancedMesh(GEO.rock, MAT.rock, rocks.length);
+      rocks.forEach((o, i) => {
+        q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), o.rot);
+        rim.setMatrixAt(i, m4.compose(v3.set(o.lx, o.y, o.lz), q, sc.set(o.s, o.s * 0.8, o.s)));
+        const j = 0.8 + hash01(o.lz, o.lx) * 0.45;
+        rim.setColorAt(i, tint.setRGB(j, j, j));
+      });
+      rim.instanceMatrix.needsUpdate = true;
+      if (rim.instanceColor) rim.instanceColor.needsUpdate = true;
+      rim.receiveShadow = true;
+      rim.computeBoundingSphere();
+      g.add(rim);
+    }
+
+    /* --- сухие ветки --- */
+    // Новое, чего раньше не было вовсе: хворост под ногами. На поляне
+    // его нет — там не с чего падать.
+    const kB = GEO.props && GEO.props.branch;
+    if (kB) {
+      const list = [];
+      for (let i = 0; i < 4; i++) {
+        const lx = rnd2() * CS, lz = rnd2() * CS;
+        const wx = this.baseX + lx, wz = this.baseZ + lz;
+        if (isWater(wx, wz) || forestType(wx, wz) === FOREST.MEADOW) continue;
+        // в скане три тонких прута по метру — вживую их не разглядеть,
+        // поэтому ветки у нас в полтора-два раза крупнее
+        list.push({ lx, lz, y: terrainHeight(wx, wz) + 0.02, s: 1.4 + rnd2() * 0.7, rot: rnd2() * TAU });
+      }
+      if (list.length) {
+        const im = new THREE.InstancedMesh(kB.geo, kB.mat, list.length);
+        list.forEach((o, i) => {
+          q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), o.rot);
+          im.setMatrixAt(i, m4.compose(v3.set(o.lx, o.y, o.lz), q, sc.set(o.s, o.s, o.s)));
+        });
+        im.instanceMatrix.needsUpdate = true;
+        im.receiveShadow = true;
+        im.computeBoundingSphere();
+        g.add(im);
+      }
+    }
 
     /* --- трава --- */
     const gn = CONFIG.quality === 'low' ? (CONFIG.grassPerChunk * 0.4) | 0 : CONFIG.grassPerChunk;
@@ -1058,17 +1511,27 @@ class Chunk {
     for (const d of defs) {
       const geo = getMushroomGeometry(d.sp, d.variant);
       const mesh = new THREE.Mesh(geo, MAT_MUSHROOM);
-      const y = d.onStump
-        ? terrainHeight(this.baseX + d.onStump.x, this.baseZ + d.onStump.z) + 0.5
-        : terrainHeight(this.baseX + d.lx, this.baseZ + d.lz) - 0.004;
-      mesh.position.set(d.lx, y, d.lz);
+      // Опята — на сам спил. Раньше гроздь ставилась там, где её
+      // нашёл генератор (до трёх метров от пня), а высоту брала с верха
+      // пня — и грибы висели в полуметре над землёй рядом с ним.
+      let px = d.lx, pz = d.lz, y;
+      if (d.onStump) {
+        const r = 0.05 + ((d.variant + 1) / (GEO_VARIANTS + 1)) * 0.2;
+        px = d.onStump.x + Math.cos(d.rot) * r;
+        pz = d.onStump.z + Math.sin(d.rot) * r;
+        const top = d.onStump.top === undefined ? 0.5 : d.onStump.top;
+        y = terrainHeight(this.baseX + d.onStump.x, this.baseZ + d.onStump.z) + top - 0.05;
+      } else {
+        y = terrainHeight(this.baseX + d.lx, this.baseZ + d.lz) - 0.004;
+      }
+      mesh.position.set(px, y, pz);
       mesh.rotation.set(d.tilt * 0.7, d.rot, d.tilt);
       mesh.visible = false;
       mesh.frustumCulled = true;
       this.mushGroup.add(mesh);
       const m = {
         sp: d.sp, mesh,
-        wx: wrapCoord(this.baseX + d.lx), wz: wrapCoord(this.baseZ + d.lz),
+        wx: wrapCoord(this.baseX + px), wz: wrapCoord(this.baseZ + pz),
         y, picked: false, respawn: 0, chunk: this,
       };
       mesh.userData.m = m;
@@ -1472,11 +1935,14 @@ export class World {
         sunDir: { value: new THREE.Vector3(0, 1, 0) },
         sunCol: { value: new THREE.Color(0xffe6b0) },
         night: { value: 0 },
+        // 0 — небо помечается прозрачным для постобработки (post.js):
+        // по этой метке она отличает небо от светлой земли
+        skyA: { value: 1 },
       },
       vertexShader: `varying vec3 vP; void main(){ vP = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);} `,
       fragmentShader: `
         uniform vec3 top; uniform vec3 bottom; uniform vec3 sunDir; uniform vec3 sunCol;
-        uniform float night;
+        uniform float night, skyA;
         varying vec3 vP;
         void main(){
           vec3 d = normalize(vP);
@@ -1493,7 +1959,7 @@ export class World {
             float star = smoothstep(0.9972, 1.0, h);
             col += vec3(star) * night * smoothstep(0.0, 0.35, d.y) * 1.4;
           }
-          gl_FragColor = vec4(col, 1.0);
+          gl_FragColor = vec4(col, skyA);
         }`,
       side: THREE.BackSide, depthWrite: false, fog: false,
     });

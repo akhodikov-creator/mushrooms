@@ -163,32 +163,111 @@ export const leafTex = () => make('leaf', 128, 128, (g, w, h) => {
   }
 }, { wrap: THREE.ClampToEdgeWrapping });
 
-export const needleTex = () => make('needle', 128, 128, (g, w, h) => {
+/**
+ * Еловая лапа — «ёлочкой»: веточка по центру кадра (слева у ствола,
+ * справа кончик), от неё вперёд расходятся боковые веточки, и всё
+ * густо обсажено короткой хвоей. Кончики каждой веточки — светлый
+ * летний прирост: по нему ель и читается живой, а не чёрной.
+ *
+ * Хвоя рисуется почти белёсой нарочно. Материал хвои объявлен с
+ * vertexColors, и цвет породы приходит оттуда. Если положить зелёный
+ * ещё и в текстуру, он умножится сам на себя — ель становилась чёрным
+ * силуэтом, и на её фоне терялся весь остальной лес. Внутри лапы, у
+ * веточки, тон темнее — это тень в глубине хвои.
+ *
+ * Иглы толще, чем в жизни: у дальних деревьев текстура уменьшается, и
+ * тонкие штрихи растворялись бы — крона издалека выглядела бы редкой.
+ */
+export const needleTex = () => make('needle', 256, 256, (g, w, h) => {
   g.clearRect(0, 0, w, h);
   const r = rng(31337);
-  // Ветка идёт по центру, иглы расходятся почти на всю высоту кадра —
-  // иначе на квадрате остаётся тонкая полоска хвои и дерево лысое.
-  // Ветка и иглы рисуются почти белёсыми нарочно. Материал хвои
-  // объявлен с vertexColors, и цвет породы приходит оттуда: сосна
-  // светлее, ель темнее. Если положить зелёный ещё и в текстуру, он
-  // умножится сам на себя — ель становилась чёрным силуэтом, и на её
-  // фоне терялся весь остальной лес.
-  g.strokeStyle = '#b09a72';
-  g.lineWidth = 3.5;
-  g.beginPath(); g.moveTo(2, h / 2); g.lineTo(w - 2, h / 2); g.stroke();
-  for (let i = 0; i < 300; i++) {
-    const x = 2 + r() * (w - 4);
-    const up = r() < 0.5 ? -1 : 1;
-    // короче у основания ветки, длиннее к середине
-    const taper = 1 - Math.abs(x / w - 0.45) * 0.55;
-    const len = (26 + r() * 34) * taper;
-    const v = 0.62 + r() * 0.5;
-    g.strokeStyle = `rgba(${(176 * v) | 0},${(205 * v) | 0},${(150 * v) | 0},1)`;
-    g.lineWidth = 1.7 + r() * 1.7;
-    g.beginPath();
-    g.moveTo(x, h / 2 + up * 2);
-    g.lineTo(x + (r() - 0.5) * 20, h / 2 + up * len);
-    g.stroke();
+  const cy = h / 2;
+  const needleCol = (k, tip) => {
+    // k — глубина: 0 у веточки, 1 снаружи; tip — прирост на кончике
+    const v = (0.6 + k * 0.32 + r() * 0.14) * (tip ? 1.12 : 1);
+    return tip
+      ? `rgb(${(205 * v) | 0},${(238 * v) | 0},${(160 * v) | 0})`
+      : `rgb(${(172 * v) | 0},${(205 * v) | 0},${(160 * v) | 0})`;
+  };
+  // хвоя вдоль отрезка: короткие иглы в обе стороны под острым углом
+  const needles = (x0, y0, x1, y1, len, dens) => {
+    const dx = x1 - x0, dy = y1 - y0, L = Math.hypot(dx, dy);
+    const ux = dx / L, uy = dy / L;
+    const n = (L * dens) | 0;
+    for (let i = 0; i < n; i++) {
+      const t = i / n;
+      const px = x0 + dx * t, py = y0 + dy * t;
+      const side = i & 1 ? 1 : -1;
+      const a = side * (0.75 + r() * 0.5);
+      const c = Math.cos(a), s = Math.sin(a);
+      const nx = ux * c - uy * s, ny = ux * s + uy * c;
+      const l = len * (0.7 + r() * 0.5) * (1 - t * 0.35);
+      g.strokeStyle = needleCol(0.4 + r() * 0.6, t > 0.72);
+      g.lineWidth = 2 + r() * 1.2;
+      g.beginPath(); g.moveTo(px, py); g.lineTo(px + nx * l, py + ny * l); g.stroke();
+    }
+  };
+  // главная веточка
+  g.strokeStyle = '#8a7658';
+  g.lineWidth = 4;
+  g.beginPath(); g.moveTo(2, cy); g.lineTo(w - 6, cy); g.stroke();
+  // боковые веточки, смотрят вперёд, к кончику
+  const twigs = [];
+  for (let x = 14; x < w - 30; x += 15 + r() * 6) {
+    for (const side of [-1, 1]) {
+      const along = x / w;
+      const len = (cy - 8) * (0.55 + 0.45 * Math.sin(Math.PI * Math.min(1, along * 1.15))) * (0.8 + r() * 0.25);
+      const ang = 0.72 + r() * 0.2;
+      const x1 = x + Math.cos(ang) * len, y1 = cy + side * Math.sin(ang) * len;
+      twigs.push([x, cy, x1, y1, len]);
+    }
+  }
+  for (const [x0, y0, x1, y1] of twigs) {
+    g.strokeStyle = '#8f7c5e';
+    g.lineWidth = 2;
+    g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke();
+  }
+  // хвоя: сначала вдоль главной, потом на боковых — внешние слои поверх
+  needles(2, cy, w - 6, cy, 16, 1.1);
+  for (const [x0, y0, x1, y1] of twigs) needles(x0, y0, x1, y1, 12, 1.25);
+}, { wrap: THREE.ClampToEdgeWrapping });
+
+/**
+ * Сосновая лапа: хвоя длинная и собрана пучками на концах побегов —
+ * сосну с елью путают, если нарисовать их одинаково. Побеги
+ * расходятся веером от веточки, на каждом кисть длинных игл.
+ */
+export const pineNeedleTex = () => make('pineNeedle', 256, 256, (g, w, h) => {
+  g.clearRect(0, 0, w, h);
+  const r = rng(27182);
+  const cy = h / 2;
+  g.strokeStyle = '#9a7a58';
+  g.lineWidth = 4;
+  g.beginPath(); g.moveTo(2, cy); g.lineTo(w * 0.8, cy); g.stroke();
+  const tufts = [];
+  for (let x = 20; x < w - 20; x += 22 + r() * 10) {
+    for (const side of [-1, 1]) {
+      const ang = side * (0.35 + r() * 0.55);
+      const len = 30 + r() * 26;
+      tufts.push([x, cy, x + Math.cos(ang) * len, cy + Math.sin(ang) * len]);
+    }
+  }
+  tufts.push([w * 0.8, cy, w - 18, cy]);
+  for (const [x0, y0, x1, y1] of tufts) {
+    g.strokeStyle = '#a0805c';
+    g.lineWidth = 2.5;
+    g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke();
+    // кисть: иглы веером вокруг направления побега
+    const base = Math.atan2(y1 - y0, x1 - x0);
+    for (let i = 0; i < 26; i++) {
+      const a = base + (r() - 0.5) * 2.6;
+      const l = 22 + r() * 22;
+      const v = 0.7 + r() * 0.4;
+      g.strokeStyle = `rgb(${(178 * v) | 0},${(214 * v) | 0},${(172 * v) | 0})`;
+      g.lineWidth = 1.8 + r();
+      const sx = x0 + (x1 - x0) * (0.4 + r() * 0.6), sy = y0 + (y1 - y0) * (0.4 + r() * 0.6);
+      g.beginPath(); g.moveTo(sx, sy); g.lineTo(sx + Math.cos(a) * l, sy + Math.sin(a) * l); g.stroke();
+    }
   }
 }, { wrap: THREE.ClampToEdgeWrapping });
 

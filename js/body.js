@@ -22,7 +22,10 @@ import { dampTo, clamp } from './utils.js';
  * освободить их значит обнулить заодно чужие меши.
  */
 function disposeGeometries(node) {
-  node.traverse((o) => { if (o.isMesh && o.geometry) o.geometry.dispose(); });
+  // Сетки скачанной тары общие с загруженной моделью (instance делит
+  // геометрию): их не выбрасываем, иначе каждая смена тары заливала бы
+  // ведро в видеопамять заново.
+  node.traverse((o) => { if (o.isMesh && o.geometry && !o.userData.sharedGeo) o.geometry.dispose(); });
 }
 
 /* Горка грибов в таре: материал один на всю игру. Раньше он заводился
@@ -80,6 +83,100 @@ function paint(geo, hex) {
   return geo;
 }
 
+/* ------------------------------------------------------------
+   Скачанные модели тары и сапог (см. ASSETS в config.js).
+   Текстуры лежат рядом с .glb файлами — грузим их один раз.
+   ------------------------------------------------------------ */
+const texCache = new Map();
+function assetTex(url, srgb) {
+  if (!url) return null;
+  if (texCache.has(url)) return texCache.get(url);
+  const t = new THREE.TextureLoader().load(url);
+  t.flipY = false;                    // развёртка из glb
+  if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 4;
+  texCache.set(url, t);
+  return t;
+}
+
+const bucketMats = new Map();
+/** Пластик ведра нужного цвета: у скана корпус сплошной, цвет — наш. */
+function bucketMat(hex) {
+  let m = bucketMats.get(hex);
+  if (!m) {
+    m = new THREE.MeshStandardMaterial({
+      color: hex, roughness: 0.5, metalness: 0,
+      normalMap: assetTex(ASSETS.bucket && ASSETS.bucket.nrm, false),
+      side: THREE.DoubleSide,
+      // отражение неба как у остальной тары: в полную силу пластик
+      // выходил молочным, будто стеклянный
+      envMapIntensity: 0.35,
+    });
+    bucketMats.set(hex, m);
+  }
+  return m;
+}
+let MAT_HANDLE = null, MAT_BASKET = null, MAT_BOOT = null;
+
+/**
+ * Вписать скачанную тару в кулак.
+ *
+ * Горка грибов (setFill) и хват рассчитаны на прежнюю процедурную тару:
+ * ободок на 3 см ниже начала координат, ручка — горизонтально вдоль X.
+ * Сюда модель и ставится: ужимается до радиуса ободка, ободок — на
+ * −0,03, верх ручки отдаётся как gripY. У лукошка ручка может лежать
+ * вдоль любой оси — разворачиваем по верхним точкам.
+ */
+function fitContainer(model, radius) {
+  model.traverse((o) => { if (o.isMesh) o.userData.sharedGeo = true; });
+  model.updateMatrixWorld(true);
+  const pts = [];
+  const v = new THREE.Vector3();
+  model.traverse((o) => {
+    if (!o.isMesh) return;
+    const p = o.geometry.attributes.position;
+    for (let i = 0; i < p.count; i += 2) pts.push(v.fromBufferAttribute(p, i).applyMatrix4(o.matrixWorld).clone());
+  });
+  const box = new THREE.Box3().setFromPoints(pts);
+  const H = box.max.y - box.min.y;
+  // ручка: самые верхние точки; её направление в плане — главная ось их разброса
+  const top = pts.filter((p) => p.y > box.max.y - H * 0.08);
+  const cx = top.reduce((s, p) => s + p.x, 0) / top.length, cz = top.reduce((s, p) => s + p.z, 0) / top.length;
+  let sxx = 0, szz = 0, sxz = 0;
+  for (const p of top) { const dx = p.x - cx, dz = p.z - cz; sxx += dx * dx; szz += dz * dz; sxz += dx * dz; }
+  // угол главной оси от X; поворачиваем на него обратно — ручка ляжет вдоль X
+  const ang = 0.5 * Math.atan2(2 * sxz, sxx - szz);
+  const rot = new THREE.Matrix4().makeRotationY(ang);
+  for (const p of pts) p.applyMatrix4(rot);
+  // ободок: самая высокая полоса, где сетка почти во всю ширину
+  const b2 = new THREE.Box3().setFromPoints(pts);
+  const W = Math.max(b2.max.x - b2.min.x, b2.max.z - b2.min.z);
+  const bins = 40;
+  let rimY = b2.min.y + H * 0.6;
+  for (let i = bins - 1; i >= 0; i--) {
+    const y0 = b2.min.y + H * i / bins, y1 = y0 + H / bins;
+    let mnx = 1e9, mxx = -1e9, mnz = 1e9, mxz = -1e9;
+    for (const p of pts) {
+      if (p.y < y0 || p.y >= y1) continue;
+      mnx = Math.min(mnx, p.x); mxx = Math.max(mxx, p.x); mnz = Math.min(mnz, p.z); mxz = Math.max(mxz, p.z);
+    }
+    if (mxx > mnx && Math.min(mxx - mnx, mxz - mnz) > W * 0.8) { rimY = y1; break; }
+  }
+  const k = radius / (W / 2);
+  const inner = new THREE.Group();
+  inner.add(model);
+  inner.rotation.y = ang;
+  const g = new THREE.Group();
+  g.add(inner);
+  g.scale.setScalar(k);
+  const ccx = (b2.min.x + b2.max.x) / 2, ccz = (b2.min.z + b2.max.z) / 2;
+  g.position.set(-ccx * k, -0.03 - rimY * k, -ccz * k);
+  const wrap = new THREE.Group();
+  wrap.add(g);
+  wrap.userData.gripY = -0.03 + (b2.max.y - rimY) * k - 0.004;
+  return wrap;
+}
+
 function group(pairs) {
   const g = new THREE.Group();
   for (const [mat, parts] of pairs) {
@@ -108,16 +205,18 @@ function buildLeg(side, boots) {
   shin.translate(x, (KNEE + FOOT) / 2, -0.10);
   cloth.push(paint(shin, 0xa8ac98));
 
+  const shaftParts = [];
   if (boots) {
-    // резиновый сапог: высокое голенище, раструб и рифлёная подошва
+    // резиновый сапог: высокое голенище, раструб и рифлёная подошва.
+    // Голенище отдельным мешем: когда приедет модель сапога, оно прячется.
     const shaft = new THREE.CylinderGeometry(0.092, 0.084, 0.36, 12);
     shaft.rotateX(-0.06);
     shaft.translate(x, FOOT + 0.2, -0.115);
-    shoe.push(paint(shaft, 0x2a3a40));
+    shaftParts.push(paint(shaft, 0x2a3a40));
     const cuff = new THREE.CylinderGeometry(0.1, 0.092, 0.055, 12);
     cuff.rotateX(-0.06);
     cuff.translate(x, FOOT + 0.38, -0.125);
-    shoe.push(paint(cuff, 0x3c5058));
+    shaftParts.push(paint(cuff, 0x3c5058));
 
   } else {
     // обычный кирзовый ботинок
@@ -129,22 +228,44 @@ function buildLeg(side, boots) {
   }
 
   const g = group([[MAT.cloth, cloth], [boots ? MAT.rubber : MAT.leather, shoe]]);
+  const shaftMesh = shaftParts.length ? new THREE.Mesh(mergeParts(shaftParts), MAT.rubber) : null;
+  if (shaftMesh) g.add(shaftMesh);
 
   // Сама ступня — отдельным узлом: её подменяет скачанная модель, когда
   // догрузится. Модель одна на обе ноги, левая получается зеркалом.
   const node = new THREE.Group();
   node.position.set(x, FOOT - (boots ? 0.055 : 0.048), -0.225);
   node.scale.x = side;
-  fillFoot(node, boots);
-  onAsset('feet', () => fillFoot(node, boots));
+  fillFoot(node, boots, shaftMesh);
+  onAsset('feet', () => fillFoot(node, boots, shaftMesh));
+  if (boots) onAsset('boots', () => fillFoot(node, boots, shaftMesh));
   g.add(node);
 
   return g;
 }
 
 /** Наполняет узел ступни: внешняя модель или коробка с носком. */
-function fillFoot(node, boots) {
+function fillFoot(node, boots, shaftMesh) {
   node.clear();
+  // Сапог целиком — со своим голенищем, процедурное тогда не нужно.
+  const boot = boots ? instance('boots') : null;
+  if (boot) {
+    if (!MAT_BOOT) {
+      MAT_BOOT = new THREE.MeshStandardMaterial({
+        map: assetTex(ASSETS.boots.tex, true), normalMap: assetTex(ASSETS.boots.nrm, false),
+        roughness: 0.42, metalness: 0, envMapIntensity: 0.5,
+      });
+    }
+    boot.traverse((o) => { if (o.isMesh) o.material = MAT_BOOT; });
+    // голенище скана стоит над пяткой — сдвигаем, чтобы оно пришлось
+    // под штанину, и чуть шире: скан снят с узкой ноги
+    boot.scale.set(1.25, 1.1, 1.1);
+    boot.position.set(0, 0.012, 0.03);
+    node.add(boot);
+    if (shaftMesh) shaftMesh.visible = false;
+    return;
+  }
+  if (shaftMesh) shaftMesh.visible = true;
   const mat = boots ? MAT.rubber : MAT.leather;
   // Под кроной леса тёмная обувь сливается в кляксу — берём на пару
   // тонов светлее, чем красили коробку.
@@ -181,6 +302,31 @@ function fillFoot(node, boots) {
    Тара в левой руке
    ------------------------------------------------------------ */
 function buildContainer(model) {
+  if (model === 'basket') {
+    const m = instance('basket');
+    if (m) {
+      if (!MAT_BASKET) {
+        MAT_BASKET = new THREE.MeshStandardMaterial({
+          map: assetTex(ASSETS.basket.tex, true), roughness: 0.85, metalness: 0, side: THREE.DoubleSide,
+          envMapIntensity: 0.3,
+          // плетёнка в скане снята при ярком свете и на солнце в игре
+          // выгорала добела — приглушаем и чуть утепляем
+          color: 0xb89c74,
+        });
+      }
+      m.traverse((o) => { if (o.isMesh) o.material = MAT_BASKET; });
+      return fitContainer(m, 0.15);
+    }
+  } else if (model && model.startsWith('pail')) {
+    const m = instance('bucket');
+    if (m) {
+      const size = { pail3: 0.105, pail5: 0.125, pail10: 0.155 }[model] || 0.12;
+      const col = { pail3: 0xe6e8ea, pail5: 0x3f72c0, pail10: 0xc8402e }[model] || 0xe6e8ea;
+      if (!MAT_HANDLE) MAT_HANDLE = new THREE.MeshStandardMaterial({ color: 0xb4b8be, roughness: 0.35, metalness: 0.85, envMapIntensity: 1.1 });
+      m.traverse((o) => { if (o.isMesh) o.material = o.name === 'handle' ? MAT_HANDLE : bucketMat(col); });
+      return fitContainer(m, size);
+    }
+  }
   const plastic = [], metal = [], wicker = [];
   let gripY = 0;   // где у этой тары ручка — за неё и держит кулак
 
@@ -304,8 +450,10 @@ function fillLeftHand(node) {
     const cfg = ASSETS.hands;
     // модель даёт одну конкретную руку; если пришла правая — зеркалим
     if ((cfg.side || 1) !== -1) model.scale.x *= -1;
-    model.traverse((o) => { if (o.isMesh) o.material = MAT.skin; });
-    poseHandBones(model, cfg.fistCurl, cfg.bendAxis, cfg.bendSign);
+    model.traverse((o) => {
+      if (o.isMesh) o.material = o.material && o.material.name === 'basicRigSkin' ? MAT.nail : MAT.skin;
+    });
+    poseHandBones(model, cfg.fistCurl, cfg.bendAxis, cfg.bendSign, cfg.thumbAxis, cfg.thumbSign);
     node.add(model);
     return;
   }
@@ -341,6 +489,15 @@ export class Body {
     this.armWrap.add(this.containerNode);
     this.tier = -1;
     this.setContainer(0);
+    // Модели тары могут приехать позже, чем собрана первая тара.
+    const refresh = () => {
+      const t = this.tier;
+      this.tier = -1;
+      this.setContainer(t);
+      if (this.fill !== undefined) this.setFill(this.fill);
+    };
+    onAsset('bucket', refresh);
+    onAsset('basket', refresh);
 
     this.bob = 0;
     this.legPhase = 0;

@@ -110,11 +110,15 @@ function fillHand(node) {
     const cfg = ASSETS.hands;
     if (side !== (cfg.side || 1)) model.scale.x *= -1;
     // тот же материал, что у предплечья: иначе на запястье виден стык
-    model.traverse((o) => { if (o.isMesh) o.material = VM.skin; });
+    // Ногти у новой модели — отдельная сетка со своим материалом
+    // (basicRigSkin), им — материал ногтей.
+    model.traverse((o) => {
+      if (o.isMesh) o.material = o.material && o.material.name === 'basicRigSkin' ? VM.nail : VM.skin;
+    });
     const curls = pose === 'fist' ? cfg.fistCurl : cfg.openCurl;
     // знак сгиба от стороны не зависит: зеркало применяется к целой
     // кисти вместе со скелетом и само переворачивает позу
-    const bones = poseHandBones(model, curls, cfg.bendAxis, cfg.bendSign);
+    const bones = poseHandBones(model, curls, cfg.bendAxis, cfg.bendSign, cfg.thumbAxis, cfg.thumbSign);
     if (!bones) {
       console.info('[hands] в модели нет костей — поза остаётся как в файле');
     }
