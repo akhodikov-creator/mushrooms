@@ -4,7 +4,9 @@ import { CONTAINERS, ASSETS } from './config.js';
 import { skinTex, clothTex, metalTex, woodTex } from './textures.js';
 import { buildHandGeometry } from './handmesh.js';
 import { onAsset, instance, poseHandBones } from './assets.js';
-import { dampTo, clamp } from './utils.js';
+import { dampTo, clamp, rng } from './utils.js';
+import { forearmGeometry, sleeveGeometry } from './arm.js';
+import { getMushroomGeometry, SPECIES_BY_ID, MAT_MUSHROOM, GEO_VARIANTS } from './mushrooms.js';
 
 /* ============================================================
    Тело от первого лица: ноги с обувью внизу кадра и левая рука
@@ -28,11 +30,15 @@ function disposeGeometries(node) {
   node.traverse((o) => { if (o.isMesh && o.geometry && !o.userData.sharedGeo) o.geometry.dispose(); });
 }
 
-/* Горка грибов в таре: материал один на всю игру. Раньше он заводился
-   заново вместе с мешем при каждой смене тары. */
+/* Подложка под горкой грибов — тёмная масса на дне, чтобы сквозь
+   щели между грибами не просвечивало пустое дно. Материал один на всю
+   игру: раньше он заводился заново при каждой смене тары. */
 const MAT_FILL = new THREE.MeshStandardMaterial({
-  color: 0x9a6a3a, roughness: 0.85, metalness: 0,
+  color: 0x6e5034, roughness: 0.9, metalness: 0,
 });
+
+/* Радиус горловины тары: по нему и насыпается горка. */
+const RIM_R = { pail3: 0.105, pail5: 0.125, pail10: 0.155, basket: 0.15 };
 
 /* Стенки вёдер и лукошка — открытые цилиндры без толщины. С обычным
    отсечением изнанки задняя стенка изнутри пропадала, и сквозь тару
@@ -152,7 +158,7 @@ function fitContainer(model, radius) {
   const b2 = new THREE.Box3().setFromPoints(pts);
   const W = Math.max(b2.max.x - b2.min.x, b2.max.z - b2.min.z);
   const bins = 40;
-  let rimY = b2.min.y + H * 0.6;
+  let rimY = b2.min.y + H * 0.6, rimW = W;
   for (let i = bins - 1; i >= 0; i--) {
     const y0 = b2.min.y + H * i / bins, y1 = y0 + H / bins;
     let mnx = 1e9, mxx = -1e9, mnz = 1e9, mxz = -1e9;
@@ -160,7 +166,7 @@ function fitContainer(model, radius) {
       if (p.y < y0 || p.y >= y1) continue;
       mnx = Math.min(mnx, p.x); mxx = Math.max(mxx, p.x); mnz = Math.min(mnz, p.z); mxz = Math.max(mxz, p.z);
     }
-    if (mxx > mnx && Math.min(mxx - mnx, mxz - mnz) > W * 0.8) { rimY = y1; break; }
+    if (mxx > mnx && Math.min(mxx - mnx, mxz - mnz) > W * 0.8) { rimY = y1; rimW = Math.min(mxx - mnx, mxz - mnz); break; }
   }
   const k = radius / (W / 2);
   const inner = new THREE.Group();
@@ -174,6 +180,8 @@ function fitContainer(model, radius) {
   const wrap = new THREE.Group();
   wrap.add(g);
   wrap.userData.gripY = -0.03 + (b2.max.y - rimY) * k - 0.004;
+  // внутренний радиус горловины — по нему насыпается горка (setFill)
+  wrap.userData.rimR = (rimW / 2) * k * 0.9;
   return wrap;
 }
 
@@ -423,19 +431,16 @@ function buildLeftHand() {
 
   // Предплечье уходит от кисти НАЗАД и чуть вниз — к локтю у бока.
   // Раньше оно торчало вверх и читалось как гриб на палке.
-  const cloth = [];
   const A = 1.95;
-  const dy = Math.cos(A), dz = Math.sin(A);
-  // Голая рука, а на дальнем конце — закатанный рукав. Заодно он
-  // затыкает срез запястья модели: у неё он на 0,10 м от кисти, и
-  // открытым читается как плоский лоскут.
-  const arm = new THREE.CylinderGeometry(0.039, 0.047, 0.14, 14);
-  arm.rotateX(A);
-  arm.translate(0.004, HAND_GRIP + dy * 0.115, dz * 0.115);
-  const roll = new THREE.CylinderGeometry(0.052, 0.050, 0.055, 14);
-  roll.rotateX(A);
-  roll.translate(0.008, HAND_GRIP + dy * 0.20, dz * 0.20);
-  cloth.push(paint(roll, 0x8e9a72));
+  // Голая рука, а дальше — закатанный рукав (arm.js). Строятся они
+  // вдоль +Z; поворот ставит их по оси предплечья, туда же, куда
+  // смотрела прежняя труба.
+  const M = new THREE.Matrix4().makeRotationX(A - Math.PI / 2)
+    .premultiply(new THREE.Matrix4().makeTranslation(0.004, HAND_GRIP, 0));
+  const arm = forearmGeometry(0.17);
+  arm.translate(0, 0, 0.03);
+  arm.applyMatrix4(M);
+  const cloth = sleeveGeometry(0.168, 0.14).map((geo) => geo.applyMatrix4(M));
   g.add(new THREE.Mesh(arm, MAT.skin));
   g.add(new THREE.Mesh(mergeParts(cloth), MAT.cloth));
 
@@ -532,6 +537,8 @@ export class Body {
     // clear() выбросил и горку грибов — ссылку тоже надо сбросить,
     // иначе после апгрейда тары наполнение перестаёт показываться
     this.fillMesh = null;
+    this.pile = null;
+    this.pileKey = null;
     const def = CONTAINERS[tier];
     if (!def) return;
     const c = buildContainer(def.model);
@@ -542,21 +549,69 @@ export class Body {
     this.containerBase = c.position.y;
   }
 
-  /** Показывает, сколько набрано: грибы горкой в таре. */
-  setFill(ratio) {
+  /**
+   * Показывает, сколько набрано: грибы горкой в таре.
+   *
+   * Горка — из тех самых грибов, что лежат в таре (inv.bag): набрал
+   * подосиновиков — сверху рыжие шляпки, попался мухомор — торчит
+   * красный. Грибы уменьшенные копии лесных, лежат вповалку, к середине
+   * горкой. Места у каждого гриба постоянные, и от нового гриба горка
+   * не перетасовывается — только прирастает.
+   */
+  setFill(ratio, bag) {
     this.fill = ratio;
+    this.bag = bag || this.bag;
     if (!this.fillMesh) {
       const g = new THREE.SphereGeometry(0.1, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2);
-      g.scale(1, 0.45, 1);
+      g.scale(1, 0.3, 1);
       this.fillMesh = new THREE.Mesh(g, MAT_FILL);
       this.containerNode.add(this.fillMesh);
     }
     const def = CONTAINERS[this.tier];
     const isBag = def && (def.model === 'bagS' || def.model === 'bagL');
-    const r = isBag ? 0.07 : def && def.model === 'basket' ? 0.13 : 0.1;
+    const R = (this.current && this.current.userData.rimR) || (def && RIM_R[def.model]) || 0.1;
+    const baseY = (this.containerBase || 0) - 0.035 - (1 - ratio) * 0.06;
     this.fillMesh.visible = ratio > 0.02 && !isBag;
-    this.fillMesh.scale.setScalar((r / 0.1) * (0.6 + ratio * 0.4));
-    this.fillMesh.position.y = (this.containerBase || 0) - 0.035 - (1 - ratio) * 0.06;
+    // подложка чуть уже горловины: ниже края стенки сходятся, и шире
+    // она вылезала бы сквозь них бурой полосой
+    this.fillMesh.scale.setScalar((R * 0.78 / 0.1) * (0.55 + ratio * 0.45));
+    this.fillMesh.position.y = baseY - 0.012;
+
+    // сколько грибов видно: растёт с наполнением, но не бесконечно
+    const n = isBag || ratio <= 0.02 ? 0 : Math.min(30, 3 + Math.round(ratio * 27));
+    const ids = [];
+    let total = 0;
+    for (const [id, c] of Object.entries(this.bag || {})) if (c > 0 && SPECIES_BY_ID[id]) { ids.push([id, c]); total += c; }
+    const key = this.tier + '|' + n + '|' + ids.map(([id, c]) => id + c).join(',');
+    if (key === this.pileKey) {
+      if (this.pile) this.pile.position.y = baseY;
+      return;
+    }
+    this.pileKey = key;
+    if (this.pile) { this.containerNode.remove(this.pile); this.pile = null; }
+    if (!n || !total) return;
+    const pile = new THREE.Group();
+    for (let i = 0; i < n; i++) {
+      const r = rng(0x5eed + i * 7919);
+      // вид для этого места: по доле в таре
+      let pick = r() * total, id = ids[0][0];
+      for (const [sid, c] of ids) { pick -= c; if (pick <= 0) { id = sid; break; } }
+      const sp = SPECIES_BY_ID[id];
+      const geo = getMushroomGeometry(sp, (i * 3 + 1) % GEO_VARIANTS);
+      const m = new THREE.Mesh(geo, MAT_MUSHROOM);
+      m.userData.sharedGeo = true;          // геометрия общая с лесом — не выбрасывать
+      const k = (R * 0.25 / Math.max(0.01, geo.userData.capR)) * (0.8 + r() * 0.4);
+      m.scale.setScalar(k);
+      const rho = Math.sqrt(r()) * R * 0.7, a = r() * Math.PI * 2;
+      const hump = (1 - (rho / R) * (rho / R)) * R * 0.22 - 0.01;
+      m.position.set(Math.cos(a) * rho, hump + i * 0.0015, Math.sin(a) * rho);
+      // вповалку: кто на боку, кто шляпкой вверх
+      m.rotation.set((r() - 0.5) * 3.0, r() * Math.PI * 2, (r() - 0.5) * 1.6);
+      pile.add(m);
+    }
+    pile.position.y = baseY;
+    this.containerNode.add(pile);
+    this.pile = pile;
   }
 
   update(dt, player, inv, weapons) {
@@ -592,7 +647,7 @@ export class Body {
 
     if (inv) {
       this.setContainer(inv.tier);
-      this.setFill(inv.fillRatio);
+      this.setFill(inv.fillRatio, inv.bag);
     }
   }
 

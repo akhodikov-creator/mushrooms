@@ -4,6 +4,7 @@ import { Audio } from './audio.js';
 import { metalTex, woodTex, skinTex, clothTex } from './textures.js';
 import { buildHandGeometry } from './handmesh.js';
 import { onAsset, instance, poseHandBones } from './assets.js';
+import { forearmGeometry, sleeveGeometry } from './arm.js';
 import { ASSETS } from './config.js';
 import { MAT_MUSHROOM as MAT_HARVEST } from './mushrooms.js';
 import { clamp, dampTo, lerp } from './utils.js';
@@ -137,22 +138,15 @@ function fillHand(node) {
  * от запястья назад.
  */
 function sleeveAt(m) {
-  const skin = [], cloth = [];
-
-  const arm = new THREE.CylinderGeometry(0.039, 0.047, 0.13, 14);
-  arm.rotateX(Math.PI / 2);
-  arm.translate(0, 0, 0.08);
+  // предплечье по форме руки и закатанный рукав в складках (arm.js);
+  // рукав короткий — длиннее он заходил бы за камеру
+  // начало трубки уходит внутрь кисти: иначе на запястье виден её
+  // открытый край тёмной щелью
+  const arm = forearmGeometry(0.19);
+  arm.translate(0, 0, -0.014);
   arm.applyMatrix4(m);
-  skin.push(arm);
-
-  // закатанный рукав: валик ткани, чтобы рука не обрывалась в пустоте
-  const roll = new THREE.CylinderGeometry(0.052, 0.050, 0.055, 14);
-  roll.rotateX(Math.PI / 2);
-  roll.translate(0, 0, 0.158);
-  roll.applyMatrix4(m);
-  cloth.push(paint(roll, 0x8e9a72));
-
-  return { skin, cloth };
+  const cloth = sleeveGeometry(0.13, 0.1).map((g) => g.applyMatrix4(m));
+  return { skin: [arm], cloth };
 }
 
 /**

@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { mergeParts } from './geo.js';
 import { CONFIG } from './config.js';
 import { rng, terrainHeight, moisture, isWater, clamp, TAU, forestType } from './utils.js';
-import { capTex } from './textures.js';
+import { mushAtlasTex, MUSH_TILE } from './textures.js';
 
 /* ============================================================
    Виды грибов средней полосы России.
@@ -148,9 +148,8 @@ export const SPECIES_BY_ID = Object.fromEntries(SPECIES.map((s) => [s.id, s]));
 /* ------------------------------------------------------------
    Профиль шляпки для LatheGeometry: массив Vector2 (радиус, высота)
    ------------------------------------------------------------ */
-function capProfile(r, h, shape, stemR) {
+function capProfile(r, h, shape, stemR, N = 14) {
   const pts = [];
-  const N = 11;
   const yOf = (t) => {
     switch (shape) {
       case 'bulb':   return h * Math.pow(Math.cos((t * Math.PI) / 2), 0.72);
@@ -189,25 +188,103 @@ function paint(geo, hex) {
   return geo;
 }
 
-/** Собирает один меш-грибу: шляпка + ножка + пластинки + крап. */
-function buildMushroomGeometry(sp, rnd) {
+/* ------------------------------------------------------------
+   Какую плитку атласа (textures.js, MUSH_TILE) берёт каждая часть.
+   У подосиновика и подберёзовика ножка в тёмных чешуйках, у белого
+   и сатанинского — в сеточке; у трубчатых снизу губка, у остальных
+   пластинки.
+   ------------------------------------------------------------ */
+const STEM_TILE = {
+  podosinovik: 'stemScaly', podberezovik: 'stemScaly',
+  bely: 'stemNet', tsar: 'stemNet', satanic: 'stemNet',
+};
+const CAP_TILE = { zontik: 'capFlakes', dozhdevik: 'capFlakes' };
+const PORES = new Set(['bely', 'tsar', 'podosinovik', 'podberezovik', 'maslenok', 'mokhovik', 'satanic']);
+
+/**
+ * Развёртку части — в её плитку атласа. uvOf(x, y, z, u, v) даёт
+ * координаты внутри плитки 0..1; без него берётся родная развёртка.
+ * У холста верх — это v = 1 (flipY), отсюда и пересчёт ряда.
+ */
+function toTile(geo, name, uvOf) {
+  const [c, row] = MUSH_TILE[name];
+  const uv = geo.attributes.uv, pos = geo.attributes.position;
+  for (let i = 0; i < uv.count; i++) {
+    let u = uv.getX(i), v = uv.getY(i);
+    if (uvOf) [u, v] = uvOf(pos.getX(i), pos.getY(i), pos.getZ(i), u, v);
+    u = 0.04 + clamp(u, 0, 1) * 0.92;
+    v = 0.04 + clamp(v, 0, 1) * 0.92;
+    uv.setXY(i, (c + u) / 4, 1 - (row + 1) / 2 + v / 2);
+  }
+  return geo;
+}
+
+/** Вершинный цвет по правилу: fn(x, y, z) → THREE.Color. */
+function paintBy(geo, fn) {
+  const p = geo.attributes.position, n = p.count;
+  const arr = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const c = fn(p.getX(i), p.getY(i), p.getZ(i));
+    arr[i * 3] = c.r; arr[i * 3 + 1] = c.g; arr[i * 3 + 2] = c.b;
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(arr, 3));
+  return geo;
+}
+
+/** Развернуть грани наизнанку (порядок обхода треугольников). */
+function flipWinding(geo) {
+  const ix = geo.index.array;
+  for (let i = 0; i < ix.length; i += 3) { const t = ix[i]; ix[i] = ix[i + 2]; ix[i + 2] = t; }
+  geo.index.needsUpdate = true;
+  return geo;
+}
+
+const EARTH = new THREE.Color(0x5a4630);
+const WHITE = new THREE.Color(0xffffff);
+
+/**
+ * Собирает один гриб: ножка, пластинки или губка, шляпка, хлопья.
+ *
+ * Цвет не плоский: шляпка к макушке темнее и насыщеннее, к краю
+ * светлее (у белого — светлая кайма, по которой его и узнают), ножка
+ * у земли в земле и темнее. Поверхность — из атласа: волокна шляпки,
+ * чешуйки или сеточка на ножке, пластинки или губка снизу.
+ */
+function buildMushroomGeometry(sp, rnd, lo = false) {
   const parts = [];
+  // Дальняя копия (lo) — та же форма и цвет, но редкая сетка: гриб за
+  // тридцать метров занимает пару пикселей, а видно их за раз под
+  // полторы сотни. Генератор вызывается в том же порядке, что и у
+  // ближней, — иначе при переключении гриб менял бы форму.
+  const SEG = lo ? 10 : 26, PN = lo ? 7 : 14;
   // Настоящие грибы мелкие, но на экране их нужно замечать —
   // поэтому весь вид слегка «игровой» по масштабу.
   const sc = (0.86 + rnd() * 0.32) * 1.34;
   const capR = sp.capR * sc, capH = sp.capH * sc;
   const stemH = sp.stemH * sc, stemR = sp.stemR * sc;
-  const capColor = sp.palette ? sp.palette[(rnd() * sp.palette.length) | 0] : sp.capColor;
+  const capHex = sp.palette ? sp.palette[(rnd() * sp.palette.length) | 0] : sp.capColor;
+  const capCol = new THREE.Color(capHex);
+  const stemCol = new THREE.Color(sp.stemColor);
+  const gillCol = new THREE.Color(sp.gills);
+  const tmp = new THREE.Color();
+
+  // ножка у земли темнеет: в неё набилась подстилка
+  const stemPaint = (hh) => (x, y) => {
+    const t = clamp(y / Math.max(0.001, hh), 0, 1);
+    tmp.copy(stemCol).lerp(EARTH, (1 - Math.min(1, t / 0.28)) * 0.55);
+    return tmp.multiplyScalar(0.86 + 0.14 * t);
+  };
+  const stemTile = STEM_TILE[sp.id] || 'stem';
 
   // ножка
   if (sp.shape === 'shelf') {
-    const st = new THREE.CylinderGeometry(stemR * 0.7, stemR, stemH, 6);
+    const st = new THREE.CylinderGeometry(stemR * 0.7, stemR, stemH, lo ? 5 : 8);
     st.rotateZ(0.5);
     st.translate(-capR * 0.55, stemH * 0.5, 0);
-    parts.push(paint(st, sp.stemColor));
+    parts.push(toTile(paint(st, sp.stemColor), stemTile));
   } else if (sp.shape !== 'ball') {
     const bulge = sp.shape === 'bulb' ? 1.55 : 1.0;
-    const st = new THREE.CylinderGeometry(stemR * 0.8, stemR * bulge, stemH, 10, 4);
+    const st = new THREE.CylinderGeometry(stemR * 0.8, stemR * bulge, stemH, lo ? 7 : 14, lo ? 1 : 5);
     // ножка слегка ведёт в сторону — прямые как карандаш не растут
     const sp2 = st.attributes.position;
     const bx = (rnd() - 0.5) * stemR * 1.2, bz = (rnd() - 0.5) * stemR * 1.2;
@@ -218,93 +295,147 @@ function buildMushroomGeometry(sp, rnd) {
     }
     st.computeVertexNormals();
     st.translate(0, stemH * 0.5, 0);
-    parts.push(paint(st, sp.stemColor));
-    // кольцо-вольва у мухоморов
-    if (sp.warts) {
-      const ring = new THREE.TorusGeometry(stemR * 1.5, stemR * 0.32, 4, 10);
+    parts.push(toTile(paintBy(st, stemPaint(stemH)), stemTile));
+    // кольцо-юбочка у мухоморов и поганки
+    if (sp.warts || sp.id === 'poganka') {
+      const ring = new THREE.TorusGeometry(stemR * 1.35, stemR * 0.28, lo ? 3 : 5, lo ? 8 : 16);
       ring.rotateX(Math.PI / 2);
-      ring.translate(0, stemH * 0.72, 0);
-      parts.push(paint(ring, sp.gills));
+      ring.scale(1, 0.6, 1);
+      ring.translate(0, stemH * 0.74, 0);
+      parts.push(toTile(paint(ring, sp.gills), 'stem'));
     }
   } else {
-    const st = new THREE.CylinderGeometry(stemR * 0.6, stemR * 0.85, stemH, 7);
+    const st = new THREE.CylinderGeometry(stemR * 0.6, stemR * 0.85, stemH, lo ? 6 : 10);
     st.translate(0, stemH * 0.5, 0);
-    parts.push(paint(st, sp.stemColor));
-  }
-
-  // пластинки/трубчатый слой — тонкий диск под шляпкой
-  if (sp.shape !== 'ball') {
-    const g = new THREE.CircleGeometry(capR * 0.94, 14);
-    g.rotateX(Math.PI / 2);
-    const gy = sp.shape === 'funnel' ? stemH + capH * 0.1 : stemH + capH * 0.04;
-    g.translate(0, gy, 0);
-    parts.push(paint(g, sp.gills));
+    parts.push(toTile(paintBy(st, stemPaint(stemH)), 'stem'));
   }
 
   // шляпка
-  const prof = capProfile(capR, capH, sp.shape, stemR);
-  const cap = new THREE.LatheGeometry(prof, 18);
+  const prof = capProfile(capR, capH, sp.shape, stemR, PN);
+  // Низ шляпки — отдельной поверхностью пластинок или губки. Идёт вдоль
+  // изнанки шляпки, от ножки к краю, чуть ниже неё: плоский диск
+  // снизу читался тарелкой.
+  const under = prof.slice(-4).reverse();      // от оси к краю изнанки
+  // Профиль идёт от макушки наружу и вниз — у LatheGeometry от этого
+  // грани смотрят внутрь, и снаружи была видна изнанка дальней стороны
+  // шляпки (тёмный серп сверху). Разворачиваем.
+  const cap = flipWinding(new THREE.LatheGeometry(prof, SEG));
   // Идеальное тело вращения выдаёт процедурку с первого взгляда:
-  // мнём окружность и заваливаем шляпку на случайную сторону.
-  const cp = cap.attributes.position;
+  // мнём окружность и заваливаем шляпку на случайную сторону. Та же
+  // деформация — и пластинкам, иначе край шляпки разойдётся с ними.
   const w1 = rnd() * TAU, w2 = rnd() * TAU;
   const tiltA = rnd() * TAU, tiltK = 0.1 + rnd() * 0.12;
-  for (let i = 0; i < cp.count; i++) {
-    const x = cp.getX(i), y = cp.getY(i), z = cp.getZ(i);
-    const ang = Math.atan2(z, x);
-    const rr = Math.hypot(x, z);
-    const k = 1 + Math.sin(ang * 2 + w1) * 0.055 + Math.sin(ang * 3 + w2) * 0.04;
-    cp.setX(i, x * k);
-    cp.setZ(i, z * k);
-    // край шляпки провисает с одной стороны
-    cp.setY(i, y - Math.cos(ang - tiltA) * (rr / Math.max(0.001, capR)) * capH * tiltK);
-  }
-  cap.computeVertexNormals();
+  const deform = (geo) => {
+    const cp = geo.attributes.position;
+    for (let i = 0; i < cp.count; i++) {
+      const x = cp.getX(i), y = cp.getY(i), z = cp.getZ(i);
+      const ang = Math.atan2(z, x);
+      const rr = Math.hypot(x, z);
+      const k = 1 + Math.sin(ang * 2 + w1) * 0.055 + Math.sin(ang * 3 + w2) * 0.04;
+      cp.setX(i, x * k);
+      cp.setZ(i, z * k);
+      cp.setY(i, y - Math.cos(ang - tiltA) * (rr / Math.max(0.001, capR)) * capH * tiltK);
+    }
+    geo.computeVertexNormals();
+    return geo;
+  };
+  // цвет шляпки: макушка темнее, край светлее
+  const rimCol = new THREE.Color(capHex).lerp(WHITE, 0.2);
+  const band = sp.id === 'bely' || sp.id === 'tsar' ? new THREE.Color(0xe2d2ae) : null;
+  const centerCol = new THREE.Color(capHex).multiplyScalar(0.78);
+  paintBy(cap, (x, y, z) => {
+    const t = clamp(Math.hypot(x, z) / capR, 0, 1);
+    tmp.copy(centerCol).lerp(capCol, Math.min(1, t / 0.55));
+    if (t > 0.55) tmp.lerp(rimCol, (t - 0.55) / 0.45);
+    if (band && t > 0.86) tmp.lerp(band, Math.min(1, (t - 0.86) / 0.1) * 0.8);
+    return tmp;
+  });
+  toTile(cap, CAP_TILE[sp.id] || 'cap', (x, y, z) => [0.5 + x / (2.1 * capR), 0.5 + z / (2.1 * capR)]);
+  deform(cap);
   cap.translate(0, stemH, 0);
-  if (sp.shape === 'shelf') {
-    cap.scale(1, 1, 0.62);
-    cap.translate(capR * 0.12, 0, 0);
+
+  let gills = null;
+  if (sp.shape !== 'ball') {
+    const pts = [];
+    const GN = lo ? 3 : 6;
+    for (let i = 0; i <= GN; i++) {
+      const t = i / GN;
+      // по изнанке: ломаная из профиля, чуть ниже неё
+      const seg = t * (under.length - 1), k = Math.min(under.length - 2, Math.floor(seg)), f = seg - k;
+      const x = under[k].x + (under[k + 1].x - under[k].x) * f;
+      const y = under[k].y + (under[k + 1].y - under[k].y) * f;
+      pts.push(new THREE.Vector2(Math.max(stemR * 0.95, Math.min(capR * 0.95, x)), y - 0.0025));
+    }
+    gills = new THREE.LatheGeometry(pts, SEG);
+    paintBy(gills, (x, y, z) => {
+      const t = clamp(Math.hypot(x, z) / capR, 0, 1);
+      return tmp.copy(gillCol).multiplyScalar(0.72 + 0.28 * t);
+    });
+    toTile(gills, PORES.has(sp.id) ? 'pores' : 'gills', (x, y, z) => [0.5 + x / (2 * capR), 0.5 + z / (2 * capR)]);
+    deform(gills);
+    gills.translate(0, stemH, 0);
+    // изнанкой вниз: у тела вращения нормали смотрят наружу от оси
+    // в сторону обхода профиля — разворачиваем, если вышло вверх
+    const nrm = gills.attributes.normal;
+    let up = 0;
+    for (let i = 0; i < nrm.count; i++) up += nrm.getY(i);
+    if (up > 0) {
+      flipWinding(gills);
+      for (let i = 0; i < nrm.count; i++) nrm.setXYZ(i, -nrm.getX(i), -nrm.getY(i), -nrm.getZ(i));
+    }
   }
-  parts.push(paint(cap, capColor));
+
+  if (sp.shape === 'shelf') {
+    for (const g of [cap, gills]) {
+      if (!g) continue;
+      g.scale(1, 1, 0.62);
+      g.translate(capR * 0.12, 0, 0);
+    }
+  }
+  parts.push(cap);
+  if (gills) parts.push(gills);
 
   // белые хлопья мухомора
   if (sp.warts) {
-    const n = 7 + ((rnd() * 6) | 0);
+    const n = 8 + ((rnd() * 7) | 0);
     for (let i = 0; i < n; i++) {
-      const t = 0.16 + rnd() * 0.74;
+      const t = 0.12 + rnd() * 0.76;
       const a = rnd() * TAU;
       const rr = capR * t;
-      const yy = stemH + capH * Math.sqrt(Math.max(0, 1 - t * t * 0.94)) * 0.99;
-      const w = new THREE.SphereGeometry(capR * (0.055 + rnd() * 0.05), 5, 4);
-      w.scale(1, 0.5, 1);
+      const yy = stemH + capH * Math.sqrt(Math.max(0, 1 - t * t * 0.94)) * 0.99
+        - Math.cos(a - tiltA) * t * capH * tiltK;
+      const w = new THREE.SphereGeometry(capR * (0.05 + rnd() * 0.05), lo ? 4 : 7, lo ? 2 : 4);
+      w.scale(1, 0.45, 1);
       w.translate(Math.cos(a) * rr, yy, Math.sin(a) * rr);
-      parts.push(paint(w, 0xfffaf0));
+      parts.push(toTile(paint(w, 0xfff8ec), 'stem'));
     }
   }
 
-  // крап (подосиновик/зонтик/дождевик)
-  if (sp.speckle) {
-    const n = 6 + ((rnd() * 5) | 0);
-    for (let i = 0; i < n; i++) {
-      const a = rnd() * TAU;
-      const onStem = sp.id === 'podosinovik' || sp.id === 'podberezovik' || sp.id === 'zontik';
-      const s = new THREE.SphereGeometry(capR * 0.035, 4, 3);
-      if (onStem) {
-        const hh = 0.12 + rnd() * 0.78;
-        s.scale(1, 2.4, 1);
-        s.translate(Math.cos(a) * stemR * 1.02, stemH * hh, Math.sin(a) * stemR * 1.02);
-      } else {
-        const t = rnd() * 0.85;
-        s.scale(1, 0.4, 1);
-        s.translate(Math.cos(a) * capR * t, stemH + capH * (0.95 - t * 0.2), Math.sin(a) * capR * t);
-      }
-      parts.push(paint(s, sp.speckle));
+  // Хвоинка или жёлтый листок на шляпке — у каждого третьего
+  // съедобного. Мелочь, а гриб сразу «вырос в лесу», а не на складе.
+  if (!sp.poison && sp.shape !== 'ball' && sp.shape !== 'shelf' && rnd() < 0.35) {
+    const a = rnd() * TAU, t = 0.2 + rnd() * 0.35;
+    const topY = (tt) => stemH + capProfile(capR, capH, sp.shape, stemR)[Math.round(tt * 14)].y;
+    // на дальней копии хвоинки не видно — случайные числа всё равно
+    // берём, чтобы остальной гриб совпал с ближним
+    const y0 = topY(t) + 0.002 - Math.cos(a - tiltA) * t * capH * tiltK;
+    let d;
+    if (rnd() < 0.5) {
+      d = new THREE.BoxGeometry(capR * 0.9, 0.0025, 0.003);
+      paint(d, 0x8a6a3a);
+    } else {
+      d = new THREE.SphereGeometry(capR * 0.22, 8, 3);
+      d.scale(1, 0.08, 0.55);
+      paint(d, 0xd8a828);
     }
+    d.rotateY(rnd() * TAU);
+    d.rotateZ((rnd() - 0.5) * 0.3);
+    d.translate(Math.cos(a) * capR * t, y0, Math.sin(a) * capR * t);
+    if (lo) d.dispose(); else parts.push(toTile(d, 'stem'));
   }
 
   const merged = mergeParts(parts);
   parts.forEach((p) => p.dispose());
-  merged.computeVertexNormals();
   merged.computeBoundingSphere();
   merged.userData.height = stemH + capH;
   merged.userData.capR = capR;
@@ -317,26 +448,36 @@ function buildMushroomGeometry(sp, rnd) {
 const geoCache = new Map();
 export const GEO_VARIANTS = 5;
 
-export function getMushroomGeometry(sp, variant) {
-  const key = sp.id + ':' + variant;
+/** lo — дальняя упрощённая копия того же гриба (см. buildMushroomGeometry). */
+export function getMushroomGeometry(sp, variant, lo = false) {
+  const key = sp.id + ':' + variant + (lo ? ':lo' : '');
   let g = geoCache.get(key);
   if (!g) {
-    g = buildMushroomGeometry(sp, rng(0x9e37 + variant * 7919 + sp.id.length * 131));
+    g = buildMushroomGeometry(sp, rng(0x9e37 + variant * 7919 + sp.id.length * 131), lo);
     geoCache.set(key, g);
   }
   return g;
 }
 
 export const MAT_MUSHROOM = new THREE.MeshStandardMaterial({
-  vertexColors: true, map: capTex(), roughness: 0.82, metalness: 0,
+  vertexColors: true, map: mushAtlasTex(), roughness: 0.74, metalness: 0,
 });
-/** Гриб рядом: лёгкое свечение, иначе шляпку не видно в траве. */
+/**
+ * Гриб рядом: лёгкое свечение, иначе шляпку не видно в траве.
+ * Светится он собственным цветом, а не общим зеленоватым: прежнее
+ * свечение прибавляло всем одну и ту же зелень, и подосиновик
+ * становился жёлтым, а белый — оливковым.
+ */
 export const MAT_MUSHROOM_NEAR = new THREE.MeshStandardMaterial({
-  vertexColors: true, map: capTex(), roughness: 0.78, metalness: 0,
-  emissive: 0x2a3410, emissiveIntensity: 1.0,
+  vertexColors: true, map: mushAtlasTex(), roughness: 0.72, metalness: 0,
 });
+MAT_MUSHROOM_NEAR.onBeforeCompile = (sh) => {
+  sh.fragmentShader = sh.fragmentShader.replace('#include <emissivemap_fragment>',
+    '#include <emissivemap_fragment>\n  totalEmissiveRadiance += diffuseColor.rgb * 0.24;');
+};
+MAT_MUSHROOM_NEAR.customProgramCacheKey = () => 'mush-near-selfglow';
 export const MAT_MUSHROOM_HL = new THREE.MeshStandardMaterial({
-  vertexColors: true, map: capTex(), roughness: 0.7, metalness: 0,
+  vertexColors: true, map: mushAtlasTex(), roughness: 0.7, metalness: 0,
   emissive: 0x66832a, emissiveIntensity: 1.0,
 });
 

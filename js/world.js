@@ -633,6 +633,7 @@ function initGeometries() {
   initGround();
   initProps();
   initBark();
+  initGroundAOMats();
 }
 
 /**
@@ -810,6 +811,133 @@ const G_TINT = [
 
 const smooth = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
 
+/* ------------------------------------------------------------
+   Притенение у основания: деревья растут из земли, а не стоят на ней
+
+   Тень от солнца есть, но она одна и падает вбок; под самим стволом,
+   под пнём и камнем земля должна темнеть всегда — туда не попадает
+   рассеянный свет неба. Без этого всё выглядело поставленным на
+   ковёр.
+
+   Одна текстура на весь мир, полметра на пиксель (2048² байт, 4 МБ).
+   Каждый чанк при постройке впечатывает в неё мягкие пятна под своими
+   деревьями, пнями, камнями, корягами и кустами; шейдер земли берёт
+   её по мировым координатам, как карту выделов. Мир зациклен — пятно
+   у края мира переходит на другой край само. Чанк строится один раз
+   за сессию, так что пятна не накладываются дважды.
+   ------------------------------------------------------------ */
+const AO_RES = 2048;
+let aoData = null, aoTex = null, aoDirty = false;
+
+function initAO() {
+  aoData = new Uint8Array(AO_RES * AO_RES).fill(255);
+  aoTex = new THREE.DataTexture(aoData, AO_RES, AO_RES, THREE.RedFormat, THREE.UnsignedByteType);
+  aoTex.wrapS = aoTex.wrapT = THREE.RepeatWrapping;
+  aoTex.magFilter = THREE.LinearFilter;
+  // Мипмапы не строим: они пересчитывались бы на каждую достройку
+  // чанка. Вдали пятна просто гасятся в шейдере.
+  aoTex.minFilter = THREE.LinearFilter;
+  aoTex.generateMipmaps = false;
+  aoTex.needsUpdate = true;
+}
+
+/** Мягкое пятно: r — радиус в метрах, k — сила в центре (0..1). */
+function aoStamp(wx, wz, r, k) {
+  if (!aoData) return;
+  const px = AO_RES / WS;
+  const cx = wx * px, cz = wz * px, R = Math.max(1, r * px);
+  const x0 = Math.floor(cx - R), x1 = Math.ceil(cx + R);
+  const z0 = Math.floor(cz - R), z1 = Math.ceil(cz + R);
+  for (let z = z0; z <= z1; z++) {
+    const iz = ((z % AO_RES) + AO_RES) % AO_RES;
+    for (let x = x0; x <= x1; x++) {
+      const d = Math.hypot(x + 0.5 - cx, z + 0.5 - cz) / R;
+      if (d >= 1) continue;
+      const t = 1 - d;
+      const occ = k * t * t * (3 - 2 * t);
+      const i = iz * AO_RES + (((x % AO_RES) + AO_RES) % AO_RES);
+      aoData[i] = Math.round(aoData[i] * (1 - occ));
+    }
+  }
+  aoDirty = true;
+}
+
+function aoCommit() {
+  if (aoTex && aoDirty) { aoTex.needsUpdate = true; aoDirty = false; }
+}
+
+/**
+ * Притенение и на самих предметах. Землю у ствола закрывают ягель,
+ * трава и клевер — они лежат поверх грунта, и одна земля под ними
+ * темнела впустую. Поэтому ту же карту читают и они, и нижняя часть
+ * стволов, пней, камней: у основания темно, выше — гаснет. Высота
+ * считается от основания предмета (его точки отсчёта), h0..h1 — где
+ * притенение сходит на нет. Так крона берёзы над собственным пятном
+ * остаётся светлой, а комель — нет.
+ */
+function addGroundAO(mat, h0, h1) {
+  if (!aoTex || !mat || mat.userData.gao) return mat;
+  mat.userData.gao = true;
+  const prev = mat.onBeforeCompile;
+  const custom = Object.prototype.hasOwnProperty.call(mat, 'customProgramCacheKey');
+  const prevKey = custom ? mat.customProgramCacheKey.bind(mat) : null;
+  // у чужой вставки без своего ключа берём её текст — иначе две разные
+  // вставки попали бы в одну программу
+  const prevSrc = !custom && prev ? prev.toString() : '';
+  let hsh = 0;
+  for (let i = 0; i < prevSrc.length; i++) hsh = (hsh * 31 + prevSrc.charCodeAt(i)) | 0;
+  const f = (v) => v.toFixed(3);
+  mat.onBeforeCompile = (sh, r) => {
+    if (prev) prev.call(mat, sh, r);
+    sh.uniforms.uAO = { value: aoTex };
+    sh.vertexShader = 'varying vec2 vAOuv;\nvarying float vAOh;\n' + sh.vertexShader.replace('#include <project_vertex>', `
+      {
+        vec4 aoP = vec4(transformed, 1.0), aoO = vec4(0.0, 0.0, 0.0, 1.0);
+        #ifdef USE_INSTANCING
+          aoP = instanceMatrix * aoP; aoO = instanceMatrix * aoO;
+        #endif
+        aoP = modelMatrix * aoP; aoO = modelMatrix * aoO;
+        vAOuv = aoP.xz / ${f(WS)};
+        vAOh = aoP.y - aoO.y;
+      }
+      #include <project_vertex>`);
+    sh.fragmentShader = 'uniform sampler2D uAO;\nvarying vec2 vAOuv;\nvarying float vAOh;\n' + sh.fragmentShader.replace('#include <color_fragment>', `#include <color_fragment>
+      {
+        float gao = texture2D(uAO, vAOuv).r;
+        gao = mix(gao, 1.0, smoothstep(${f(h0)}, ${f(h1)}, vAOh));
+        gao = mix(1.0, gao, 1.0 - smoothstep(55.0, 105.0, length(vViewPosition)));
+        diffuseColor.rgb *= gao;
+      }`);
+  };
+  mat.customProgramCacheKey = () => (prevKey ? prevKey() : '') + '_gao' + f(h0) + '_' + f(h1) + '_' + hsh;
+  mat.needsUpdate = true;
+  return mat;
+}
+
+/** Раздать притенение всем низким материалам. После initGround/initProps. */
+function initGroundAOMats() {
+  if (!aoTex) return;
+  // покров под ногами — целиком
+  for (const m of [MAT.moss, MAT.grass, MAT.kitGrass]) addGroundAO(m, 0.6, 1.5);
+  // кусты и листва: листва деревьев высоко и под притенение не попадёт
+  for (const m of [MAT.bush, MAT.kitLeaf, MAT.leaf]) addGroundAO(m, 0.3, 1.4);
+  // комли стволов
+  for (const m of [MAT.bark, MAT.birch, MAT.conBark, MAT.kitBark, MAT.kitBirch]) addGroundAO(m, 0.15, 1.3);
+  addGroundAO(MAT.rock, 0.1, 0.9);
+  addGroundAO(MAT.prop, 0.1, 0.8);
+  const P = GEO.props;
+  if (P) {
+    if (P.stumps) for (const st of P.stumps) addGroundAO(st.mat, 0.05, 0.5);
+    if (P.log) addGroundAO(P.log.mat, 0.05, 0.5);
+    if (P.rocks) addGroundAO(P.rocks.mat, 0.1, 0.9);
+    if (P.fern) addGroundAO(P.fern.mat, 0.3, 1.0);
+    if (P.branch) addGroundAO(P.branch.mat, 0.5, 1.0);
+  }
+}
+
+/** Для отладки из консоли: сама карта притенения. */
+export function aoDebug() { return { data: aoData, tex: aoTex, res: AO_RES }; }
+
 function buildBiomeMap() {
   const n = BIOME_RES, step = WS / n;
   const d0 = new Uint8Array(n * n * 4), d1 = new Uint8Array(n * n * 4);
@@ -863,7 +991,9 @@ function initGround() {
   const m = MAT.ground;
   m.map = null;              // цвет теперь целиком из сканов
   m.userData.splat = true;
+  initAO();
   m.onBeforeCompile = (sh) => {
+    sh.uniforms.uAO = { value: aoTex };
     sh.uniforms.uGCol = { value: A.col };
     sh.uniforms.uGNrm = { value: A.nrm };
     sh.uniforms.uBio0 = { value: bio0 };
@@ -880,6 +1010,7 @@ function initGround() {
       uniform highp sampler2DArray uGNrm;
       uniform sampler2D uBio0;
       uniform sampler2D uBio1;
+      uniform sampler2D uAO;
       varying vec3 vGPos;
       varying vec3 vGNrm;
       ${layers}
@@ -914,7 +1045,11 @@ function initGround() {
         // чуть поднимаем насыщенность: издали мипмапы усредняют пёструю
         // подстилку в серый, и лес начинал выглядеть пыльным
         gCol = max(mix(vec3(dot(gCol, vec3(0.3333))), gCol, 1.14), 0.0);
-        diffuseColor.rgb *= gCol;
+        // притенение у основания (см. aoStamp); вдали гасим — мипмапов у
+        // карты нет, и мелкие пятна там только рябили бы
+        float gAO = texture2D(uAO, bUV).r;
+        gAO = mix(1.0, gAO, 1.0 - smoothstep(55.0, 105.0, length(vViewPosition)));
+        diffuseColor.rgb *= gCol * gAO;
       `)
       // вершинный цвет у грунта подкрашивал выделы — теперь это делают
       // сами сканы, и двойная подкраска только замутила бы их
@@ -1504,6 +1639,26 @@ class Chunk {
     gim.computeBoundingSphere();
     g.add(gim);
 
+    /* --- притенение у основания --- */
+    // Сила и радиус на глаз: ель — густой юбкой до земли, под ней
+    // темнее всего; у сосны и берёзы крона высоко, темнеет только у
+    // самого ствола. Коряга — цепочкой пятен вдоль ствола.
+    const bx = this.baseX, bz = this.baseZ;
+    const AO_TREE = { pine: [1.8, 0.5], spruce: [3.0, 0.6], birch: [1.6, 0.45], aspen: [1.7, 0.46] };
+    for (const t of TREE_TYPES) {
+      for (const o of byType[t]) aoStamp(bx + o.lx, bz + o.lz, AO_TREE[t][0] * o.s, AO_TREE[t][1]);
+    }
+    for (const o of stumpList) aoStamp(bx + o.lx, bz + o.lz, 1.1, 0.58);
+    for (const o of logList) {
+      const ux = Math.cos(o.rot), uz = -Math.sin(o.rot);
+      for (let d = -1.8; d <= 1.81; d += 0.6) aoStamp(bx + o.lx + ux * d, bz + o.lz + uz * d, 0.6, 0.28);
+    }
+    for (const o of rocks) aoStamp(bx + o.lx, bz + o.lz, 0.8 * o.s, 0.6);
+    for (const { list } of sets) {
+      for (const o of list) aoStamp(bx + o.lx, bz + o.lz, 0.75 * (o.s || 1), 0.28);
+    }
+    aoCommit();
+
     /* --- грибы --- */
     this.mushGroup = new THREE.Group();
     g.add(this.mushGroup);
@@ -1511,6 +1666,8 @@ class Chunk {
     for (const d of defs) {
       const geo = getMushroomGeometry(d.sp, d.variant);
       const mesh = new THREE.Mesh(geo, MAT_MUSHROOM);
+      mesh.userData.geoHi = geo;
+      mesh.userData.geoLo = getMushroomGeometry(d.sp, d.variant, true);
       // Опята — на сам спил. Раньше гроздь ставилась там, где её
       // нашёл генератор (до трёх метров от пня), а высоту брала с верха
       // пня — и грибы висели в полуметре над землёй рядом с ним.
@@ -1526,6 +1683,8 @@ class Chunk {
       }
       mesh.position.set(px, y, pz);
       mesh.rotation.set(d.tilt * 0.7, d.rot, d.tilt);
+      // под грибом мох примят и темнее — гриб сидит в подстилке, а не на ней
+      if (!d.onStump) aoStamp(this.baseX + px, this.baseZ + pz, 0.3, 0.2);
       mesh.visible = false;
       mesh.frustumCulled = true;
       this.mushGroup.add(mesh);
@@ -1541,6 +1700,7 @@ class Chunk {
       // (см. requestGlow) — иначе число источников в сцене скачет.
       if (d.sp.glow) m.glow = d.sp.glow;
     }
+    aoCommit();
   }
 }
 
@@ -2246,7 +2406,12 @@ export class World {
         const vis = d2 < showR2;
         m.mesh.visible = vis;
         // «грибное чутьё»: близкие грибы чуть светятся, иначе трава их прячет
-        if (vis) m.mesh.material = d2 < 256 ? MAT_MUSHROOM_NEAR : MAT_MUSHROOM;
+        if (vis) {
+          m.mesh.material = d2 < 256 ? MAT_MUSHROOM_NEAR : MAT_MUSHROOM;
+          // дальше двадцати метров — упрощённая копия (см. mushrooms.js)
+          const ud = m.mesh.userData;
+          if (ud.geoLo) m.mesh.geometry = d2 < 400 ? ud.geoHi : ud.geoLo;
+        }
         if (m.glow && vis && d2 < 900) {
           this.requestGlow(gx + m.mesh.position.x, m.mesh.position.y + 0.3,
             gz + m.mesh.position.z, m.glow, 1.1, d2);

@@ -541,3 +541,131 @@ export function disposeTextures() {
   for (const t of cache.values()) t.dispose();
   cache.clear();
 }
+
+/* ---------------- атлас гриба ---------------- */
+/**
+ * Все поверхности гриба на одной текстуре: одна текстура — один
+ * материал, и грибы всех видов рисуются одним и тем же шейдером.
+ *
+ * Сетка 4×2 плитки по 256 пикселей (номер плитки — MUSH_TILE):
+ *   верхний ряд: шляпка · ножка гладкая · ножка в чешуйках · ножка в сеточке
+ *   нижний ряд:  пластинки · губка · шляпка в хлопьях · запас
+ *
+ * Всё рисуется почти белым: цвет вида приходит вершинным цветом и
+ * умножается на текстуру — так одна плитка ножки годится и белой
+ * поганке, и жёлтому маслёнку.
+ */
+export const MUSH_TILE = {
+  cap: [0, 0], stem: [1, 0], stemScaly: [2, 0], stemNet: [3, 0],
+  gills: [0, 1], pores: [1, 1], capFlakes: [2, 1],
+};
+
+export const mushAtlasTex = () => make('mushAtlas', 1024, 512, (g, w, h) => {
+  const T = 256;
+  const r = rng(3141);
+  g.fillStyle = '#fff';
+  g.fillRect(0, 0, w, h);
+  const tile = (c, row, draw) => {
+    g.save();
+    g.beginPath(); g.rect(c * T, row * T, T, T); g.clip();
+    g.translate(c * T, row * T);
+    draw();
+    g.restore();
+  };
+  const blot = (n, rmax, a) => {
+    for (let i = 0; i < n; i++) {
+      const v = r() < 0.5 ? 0 : 255;
+      g.fillStyle = `rgba(${v},${v},${v},${r() * a})`;
+      g.beginPath(); g.arc(r() * T, r() * T, 1 + r() * rmax, 0, 6.28); g.fill();
+    }
+  };
+
+  // шляпка (вид сверху): мягкие пятна и тонкие радиальные волокна
+  tile(0, 0, () => {
+    blot(900, 12, 0.1);
+    for (let i = 0; i < 220; i++) {
+      const a = r() * 6.28, r0 = 10 + r() * 30;
+      g.strokeStyle = `rgba(${r() < 0.6 ? '60,40,20' : '255,255,255'},${0.03 + r() * 0.06})`;
+      g.lineWidth = 0.5 + r() * 0.9;
+      g.beginPath();
+      g.moveTo(T / 2 + Math.cos(a) * r0, T / 2 + Math.sin(a) * r0);
+      g.lineTo(T / 2 + Math.cos(a) * T * 0.7, T / 2 + Math.sin(a) * T * 0.7);
+      g.stroke();
+    }
+  });
+
+  // ножка гладкая: продольные волокна (развёртка цилиндра, высота — вниз)
+  const fibers = (n, a) => {
+    for (let i = 0; i < n; i++) {
+      const x = r() * T;
+      g.strokeStyle = `rgba(${r() < 0.5 ? '90,70,50' : '255,255,255'},${0.03 + r() * a})`;
+      g.lineWidth = 0.6 + r() * 1.4;
+      g.beginPath(); g.moveTo(x, 0); g.lineTo(x + (r() - 0.5) * 6, T); g.stroke();
+    }
+  };
+  tile(1, 0, () => { blot(300, 8, 0.06); fibers(160, 0.08); });
+
+  // ножка в чешуйках: подосиновик, подберёзовик — тёмные штрихи-чешуйки,
+  // гуще книзу
+  tile(2, 0, () => {
+    fibers(90, 0.05);
+    for (let i = 0; i < 520; i++) {
+      const y = Math.pow(r(), 0.75) * T, x = r() * T;
+      const l = 2 + r() * 5, wd = 1 + r() * 1.6;
+      g.fillStyle = `rgba(30,24,20,${0.35 + r() * 0.5})`;
+      g.beginPath(); g.ellipse(x, y, wd, l, (r() - 0.5) * 0.4, 0, 6.28); g.fill();
+    }
+  });
+
+  // ножка в сеточке: белый, сатанинский — тонкая сетка, гуще вверху
+  tile(3, 0, () => {
+    fibers(60, 0.05);
+    g.strokeStyle = 'rgba(80,55,35,0.45)';
+    for (let i = 0; i < 700; i++) {
+      const y = Math.pow(r(), 1.6) * T * 0.8, x = r() * T;
+      const s = 3 + r() * 5;
+      g.lineWidth = 0.6 + r() * 0.6;
+      g.beginPath();
+      g.moveTo(x - s, y); g.lineTo(x, y - s * 1.5); g.lineTo(x + s, y); g.lineTo(x, y + s * 1.5); g.closePath();
+      g.stroke();
+    }
+  });
+
+  // пластинки (вид снизу): частые радиальные линии с короткими вставками
+  tile(0, 1, () => {
+    for (let i = 0; i < 180; i++) {
+      const a = (i / 180) * 6.28, short = i % 2 === 1;
+      const r0 = short ? T * 0.28 : T * 0.1;
+      g.strokeStyle = `rgba(${i % 3 === 0 ? '255,255,255' : '70,55,40'},${0.25 + r() * 0.2})`;
+      g.lineWidth = 1;
+      g.beginPath();
+      g.moveTo(T / 2 + Math.cos(a) * r0, T / 2 + Math.sin(a) * r0);
+      g.lineTo(T / 2 + Math.cos(a) * T * 0.5, T / 2 + Math.sin(a) * T * 0.5);
+      g.stroke();
+    }
+  });
+
+  // губка трубчатых: мелкие поры
+  tile(1, 1, () => {
+    blot(200, 10, 0.08);
+    for (let i = 0; i < 2600; i++) {
+      g.fillStyle = `rgba(70,55,30,${0.18 + r() * 0.25})`;
+      g.beginPath(); g.arc(r() * T, r() * T, 0.8 + r() * 1.3, 0, 6.28); g.fill();
+    }
+  });
+
+  // шляпка в хлопьях: зонтик и дождевик — тёмная макушка и чешуйки
+  tile(2, 1, () => {
+    blot(400, 10, 0.08);
+    const cg = g.createRadialGradient(T / 2, T / 2, 0, T / 2, T / 2, T * 0.18);
+    cg.addColorStop(0, 'rgba(70,50,30,0.8)'); cg.addColorStop(1, 'rgba(70,50,30,0)');
+    g.fillStyle = cg; g.fillRect(0, 0, T, T);
+    for (let i = 0; i < 260; i++) {
+      const a = r() * 6.28, rr = T * (0.12 + Math.pow(r(), 0.8) * 0.4);
+      g.fillStyle = `rgba(80,58,36,${0.3 + r() * 0.45})`;
+      g.beginPath();
+      g.ellipse(T / 2 + Math.cos(a) * rr, T / 2 + Math.sin(a) * rr, 2 + r() * 4, 1.5 + r() * 2.5, a, 0, 6.28);
+      g.fill();
+    }
+  });
+}, { wrap: THREE.ClampToEdgeWrapping });
