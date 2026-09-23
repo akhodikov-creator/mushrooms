@@ -4,7 +4,7 @@ import { Audio } from './audio.js';
 import { metalTex, woodTex, skinTex, clothTex } from './textures.js';
 import { buildHandGeometry } from './handmesh.js';
 import { onAsset, instance, poseHandBones } from './assets.js';
-import { forearmGeometry, sleeveGeometry } from './arm.js';
+import { forearmGeometry, sleeveGeometry, forearmOf, modelSleeve, modelSkinMaterial } from './arm.js';
 import { ASSETS } from './config.js';
 import { MAT_MUSHROOM as MAT_HARVEST } from './mushrooms.js';
 import { clamp, dampTo, lerp } from './utils.js';
@@ -86,11 +86,17 @@ function assemble(groups) {
  * процедурная кисть, либо подгруженная модель — так её можно
  * заменить на лету, когда приедет .glb.
  */
-function handSlot(side, pose, m) {
+/* Изнанка рукава: тёмная ткань, только задние грани. */
+const SLEEVE_IN = new THREE.MeshStandardMaterial({
+  color: 0x2a3020, roughness: 1, metalness: 0, side: THREE.BackSide,
+});
+
+function handSlot(side, pose, m, fore = null) {
   const node = new THREE.Group();
   node.matrixAutoUpdate = false;
   node.matrix.copy(m);
-  node.userData.hand = { side, pose };
+  // fore — процедурные предплечье с рукавом: при скачанной модели прячутся
+  node.userData.hand = { side, pose, fore };
   fillHand(node);
 
   // если для рук настроена внешняя модель — подменим, когда загрузится
@@ -100,7 +106,7 @@ function handSlot(side, pose, m) {
 
 /** Наполняет узел кисти: модель, если она есть, иначе процедурная. */
 function fillHand(node) {
-  const { side, pose } = node.userData.hand;
+  const { side, pose, fore } = node.userData.hand;
   node.clear();
 
   const model = instance('hands');
@@ -112,9 +118,9 @@ function fillHand(node) {
     if (side !== (cfg.side || 1)) model.scale.x *= -1;
     // тот же материал, что у предплечья: иначе на запястье виден стык
     // Ногти у новой модели — отдельная сетка со своим материалом
-    // (basicRigSkin), им — материал ногтей.
+    // (basicRigSkin), им — материал ногтей; коже — её собственный тон.
     model.traverse((o) => {
-      if (o.isMesh) o.material = o.material && o.material.name === 'basicRigSkin' ? VM.nail : VM.skin;
+      if (o.isMesh) o.material = o.material && o.material.name === 'basicRigSkin' ? VM.nail : modelSkinMaterial();
     });
     const curls = pose === 'fist' ? cfg.fistCurl : cfg.openCurl;
     // знак сгиба от стороны не зависит: зеркало применяется к целой
@@ -124,8 +130,20 @@ function fillHand(node) {
       console.info('[hands] в модели нет костей — поза остаётся как в файле');
     }
     node.add(model);
+    // Своё предплечье у модели до локтя: процедурное прячем, рукав
+    // кладём вдоль настоящего (arm.js)
+    const fa = forearmOf(model);
+    if (fa) {
+      if (fore) fore.visible = false;
+      // Рукав длинный, до края кадра: правая рука с ножом смотрит почти
+      // в камеру, и у короткого был виден открытый задний конец. Изнанка
+      // рукава рисуется (SLEEVE_IN) — внутрь рукава заглянуть можно.
+      const sm = mergeParts(modelSleeve(fa, 0.22));
+      node.add(new THREE.Mesh(sm, VM.cloth), new THREE.Mesh(sm, SLEEVE_IN));
+    }
     return;
   }
+  if (fore) fore.visible = true;
 
   const src = buildHandGeometry(side, pose);
   node.add(new THREE.Mesh(src.skin, VM.skin));
@@ -190,12 +208,12 @@ function armAt(side, pose, m, bend = 0) {
   arm.matrixAutoUpdate = false;
   arm.matrix.copy(m);
 
-  arm.add(handSlot(side, pose, new THREE.Matrix4()));
-
   const cuffM = new THREE.Matrix4().makeRotationX(bend);
   cuffM.premultiply(new THREE.Matrix4().makeTranslation(0, 0, WRIST_Z));
   const fore = sleeveAt(cuffM);
-  arm.add(assemble([[VM.skin, fore.skin], [VM.cloth, fore.cloth]]));
+  const foreG = assemble([[VM.skin, fore.skin], [VM.cloth, fore.cloth]]);
+  arm.add(foreG);
+  arm.add(handSlot(side, pose, new THREE.Matrix4(), foreG));
   return arm;
 }
 

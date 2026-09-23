@@ -44,6 +44,7 @@
                              ?wrist=x,y,z, пальцы в -Z, большой палец в сторону
                              ?thumb=x,y (поперёк пальцев), длина до кончика
                              среднего пальца ?len=0.175
+   &forearm=1                вместе с предплечьем до локтя
    ?bake=boar                нарисовать шкуру по положению точки на теле
                              (у кабана текстуры в архиве не было)
    ?dry=1                    только посмотреть, ничего не писать
@@ -184,6 +185,12 @@ function cutHand(meshes, side) {
   const keep = new Set();
   handBone.traverse((b) => { if (b.isBone) keep.add(skel.bones.indexOf(b)); });
   if (handBone.parent && handBone.parent.isBone) keep.add(skel.bones.indexOf(handBone.parent));
+  // предплечье до локтя (?forearm=1): у этого рига оно на своей цепочке
+  // forearmL, отдельно от кисти
+  if (q.get('forearm') === '1') {
+    const fa = skel.bones.find((b) => new RegExp('^forearm' + side + '(_[0-9]+)?$').test(b.name));
+    if (fa) keep.add(skel.bones.indexOf(fa));
+  }
   for (const m of meshes) {
     const g = m.geometry, si = g.attributes.skinIndex, sw = g.attributes.skinWeight, idx = g.index.array;
     const main = (v) => {

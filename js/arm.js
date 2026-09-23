@@ -119,3 +119,94 @@ export function sleeveGeometry(z0 = 0.13, len = 0.3, hex = 0x8e9a72) {
   parts.push(sl);
   return parts;
 }
+
+/* ------------------------------------------------------------
+   Рукав по скачанной руке
+
+   У скачанной модели (config.js, ASSETS.hands) своё предплечье до
+   локтя — с ним рука и выглядит рукой, а не кистью на трубке. Рукав
+   тогда кладётся вдоль него: ось — от запястья к локтю по костям
+   модели, ширина — по самой сетке у манжеты, чтобы рука не пролезала
+   сквозь ткань.
+   ------------------------------------------------------------ */
+const _v = new THREE.Vector3();
+
+/** Запястье и локоть модели в координатах её родителя (после зеркала). */
+export function forearmOf(model) {
+  model.updateMatrixWorld(true);
+  // В скелете остались кости обеих рук, а сетка — только у одной. Берём
+  // кисть, ближайшую к середине сетки, и предплечье той же стороны.
+  const box = new THREE.Box3();
+  model.traverse((o) => { if (o.isMesh) box.expandByObject(o); });
+  const mid = box.getCenter(new THREE.Vector3());
+  const hands = {}, fores = {};
+  model.traverse((o) => {
+    if (!o.isBone) return;
+    const n = o.name.replace(/_\d+$/, '');
+    let m = n.match(/^hand([LR]?)$/i);
+    if (m) hands[m[1]] = o.getWorldPosition(new THREE.Vector3());
+    m = n.match(/^forearm([LR]?)$/i);
+    if (m) fores[m[1]] = o.getWorldPosition(new THREE.Vector3());
+  });
+  let side = null, best = Infinity;
+  for (const [s, p] of Object.entries(hands)) {
+    const d = p.distanceTo(mid);
+    if (d < best && fores[s]) { best = d; side = s; }
+  }
+  if (side === null) return null;
+  const wrist = hands[side], elbow = fores[side];
+  if (wrist.distanceTo(elbow) < 0.05) return null;
+  // Самая дальняя от запястья точка сетки вдоль руки: докуда вырезано
+  // предплечье. Сетку берём с учётом скелета — поза уже поставлена.
+  const axis = elbow.clone().sub(wrist).normalize();
+  let far = 0, rMax = 0;
+  const rAt = [];
+  model.traverse((o) => {
+    if (!o.isSkinnedMesh) return;
+    const p = o.geometry.attributes.position;
+    for (let i = 0; i < p.count; i += 3) {
+      o.getVertexPosition(i, _v);
+      _v.applyMatrix4(o.matrixWorld).sub(wrist);
+      const along = _v.dot(axis);
+      far = Math.max(far, along);
+      rAt.push([along, _v.addScaledVector(axis, -along).length()]);
+    }
+  });
+  return { wrist, axis, far, rAt };
+}
+
+/**
+ * Рукав вдоль предплечья модели. Манжета — на 60% длины от запястья
+ * до конца вырезанного предплечья, радиус — по толщине руки там.
+ */
+export function modelSleeve(fa, len = 0.3, hex = 0x8e9a72) {
+  const z0 = fa.far * 0.6;
+  let r = 0;
+  for (const [a, rr] of fa.rAt) if (a > z0 - 0.02 && a < z0 + 0.06) r = Math.max(r, rr);
+  const k = Math.max(0.8, (r + 0.004) / 0.036);          // губа манжеты 0.036 — впритык к руке
+  const parts = sleeveGeometry(z0 / k, len / k, hex);
+  const m = new THREE.Matrix4().makeScale(k, k, k);
+  // +Z рукава — вдоль оси предплечья, начало — в запястье
+  const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), fa.axis);
+  m.premultiply(new THREE.Matrix4().makeRotationFromQuaternion(q));
+  m.premultiply(new THREE.Matrix4().makeTranslation(fa.wrist.x, fa.wrist.y, fa.wrist.z));
+  for (const g of parts) g.applyMatrix4(m);
+  return parts;
+}
+
+/**
+ * Кожа скачанной руки: ровный тон самой модели, без процедурной
+ * текстуры. Полосатая текстура кожи годилась трубке-предплечью, а на
+ * живой модели с мышцами и костяшками читалась разводами.
+ */
+let SKIN = null;
+export function modelSkinMaterial() {
+  // Тон подобран на солнце: руки у самой камеры освещены в полную силу,
+  // и тон светлее этого выгорал почти до белого. Отражение неба
+  // приглушено, как у остальных материалов тела.
+  if (!SKIN) {
+    SKIN = new THREE.MeshStandardMaterial({ color: 0xa8705a, roughness: 0.7, metalness: 0 });
+    SKIN.envMapIntensity = 0.35;
+  }
+  return SKIN;
+}

@@ -5,7 +5,7 @@ import { skinTex, clothTex, metalTex, woodTex } from './textures.js';
 import { buildHandGeometry } from './handmesh.js';
 import { onAsset, instance, poseHandBones } from './assets.js';
 import { dampTo, clamp, rng } from './utils.js';
-import { forearmGeometry, sleeveGeometry } from './arm.js';
+import { forearmGeometry, sleeveGeometry, forearmOf, modelSleeve, modelSkinMaterial } from './arm.js';
 import { getMushroomGeometry, SPECIES_BY_ID, MAT_MUSHROOM, GEO_VARIANTS } from './mushrooms.js';
 
 /* ============================================================
@@ -425,8 +425,6 @@ function buildLeftHand() {
   const node = new THREE.Group();
   node.matrixAutoUpdate = false;
   node.matrix.copy(m);
-  fillLeftHand(node);
-  onAsset('hands', () => fillLeftHand(node));
   g.add(node);
 
   // Предплечье уходит от кисти НАЗАД и чуть вниз — к локтю у бока.
@@ -441,25 +439,37 @@ function buildLeftHand() {
   arm.translate(0, 0, 0.03);
   arm.applyMatrix4(M);
   const cloth = sleeveGeometry(0.168, 0.14).map((geo) => geo.applyMatrix4(M));
-  g.add(new THREE.Mesh(arm, MAT.skin));
-  g.add(new THREE.Mesh(mergeParts(cloth), MAT.cloth));
+  const fore = new THREE.Group();
+  fore.add(new THREE.Mesh(arm, MAT.skin));
+  fore.add(new THREE.Mesh(mergeParts(cloth), MAT.cloth));
+  g.add(fore);
+  // процедурные предплечье с рукавом прячутся, если у скачанной руки своё
+  fillLeftHand(node, fore);
+  onAsset('hands', () => fillLeftHand(node, fore));
 
   return g;
 }
 
 /** Наполняет узел левой кисти: внешняя модель или процедурная. */
-function fillLeftHand(node) {
+function fillLeftHand(node, fore) {
   node.clear();
+  if (fore) fore.visible = true;
   const model = instance('hands');
   if (model) {
     const cfg = ASSETS.hands;
     // модель даёт одну конкретную руку; если пришла правая — зеркалим
     if ((cfg.side || 1) !== -1) model.scale.x *= -1;
     model.traverse((o) => {
-      if (o.isMesh) o.material = o.material && o.material.name === 'basicRigSkin' ? MAT.nail : MAT.skin;
+      if (o.isMesh) o.material = o.material && o.material.name === 'basicRigSkin' ? MAT.nail : modelSkinMaterial();
     });
     poseHandBones(model, cfg.fistCurl, cfg.bendAxis, cfg.bendSign, cfg.thumbAxis, cfg.thumbSign);
     node.add(model);
+    // у модели своё предплечье до локтя — рукав вдоль него (arm.js)
+    const fa = forearmOf(model);
+    if (fa) {
+      if (fore) fore.visible = false;
+      node.add(new THREE.Mesh(mergeParts(modelSleeve(fa)), MAT.cloth));
+    }
     return;
   }
   const src = buildHandGeometry(-1, 'fist');
